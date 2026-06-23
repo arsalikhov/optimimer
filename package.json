@@ -1,0 +1,11 @@
+{
+  "name": "optimimer",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "bun run scripts/dev.ts",
+    "dev:secure": "infisical run --env=dev -- bun run scripts/dev.ts",
+    "setup": "cd frontend && bun install",
+    "build": "cd frontend && bun run build && cd ../backend && cargo build --release"
+  }
+}

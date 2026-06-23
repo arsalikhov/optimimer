@@ -1,0 +1,21 @@
+[package]
+name = "optimimer-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.9"
+tzf-rs = "0.4"
+dotenvy = "0.15"

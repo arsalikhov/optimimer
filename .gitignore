@@ -1,0 +1,23 @@
+# secrets — supply via backend/.env (gitignored) or a secret manager, never committed
+backend/.env
+.env
+.env.*
+!.env.example
+*.env.bak
+*.env.tmp
+backend/optimimer.env
+
+# rust
+backend/target/
+
+# node / bun
+node_modules/
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+
+# runtime data (contains chat ids / personal state — regenerated at runtime)
+backend/workflows.json
+backend/schedules.json
+backend/chat_tz.json
+backend/notion-out/

@@ -1,0 +1,32 @@
+{
+  "name": "Route (voice)",
+  "nodes": [
+    {
+      "id": "trigger_1",
+      "type": "trigger",
+      "position": { "x": 40, "y": 160 },
+      "data": { "label": "Transcript" }
+    },
+    {
+      "id": "router",
+      "type": "llm",
+      "position": { "x": 320, "y": 160 },
+      "data": {
+        "label": "Route to command",
+        "model": "anthropic/claude-haiku-4.5",
+        "system": "You route a transcribed voice message to ONE command. Output ONLY minified JSON {\"command\":..., \"text\":...} — no prose, no code fences. command is exactly one of:\n- notion: a task, meeting, appointment, or workout to put in Notion\n- remind: a time-based reminder ('remind me to...', 'at 4pm...')\n- complete: marking something done/bought/finished ('I finished...', 'bought the groceries')\n- notify: send yourself a Telegram notification/ping\n- email: send an email to someone\n- note: save a note, idea, thought, or piece of information\nPick the single best fit; if it's an unclear capture or a stray thought, use \"note\". text is the cleaned-up instruction to pass to that command — a clear imperative with filler words removed, preserving all the meaningful detail (people, times, amounts).",
+        "prompt": "{{input.text}}"
+      }
+    },
+    {
+      "id": "out",
+      "type": "output",
+      "position": { "x": 620, "y": 160 },
+      "data": { "label": "Route", "value": "{{router.json}}" }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "trigger_1", "target": "router" },
+    { "id": "e2", "source": "router", "target": "out" }
+  ]
+}

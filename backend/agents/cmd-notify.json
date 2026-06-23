@@ -1,0 +1,46 @@
+{
+  "name": "Notify (command)",
+  "nodes": [
+    {
+      "id": "trigger_1",
+      "type": "trigger",
+      "position": { "x": 40, "y": 160 },
+      "data": { "label": "/notify" }
+    },
+    {
+      "id": "parse",
+      "type": "llm",
+      "position": { "x": 320, "y": 160 },
+      "data": {
+        "label": "Parse notification",
+        "model": "anthropic/claude-haiku-4.5",
+        "system": "Turn a request into a Telegram notification. Output ONLY minified JSON — no prose, no code fences. NEVER compute dates/times yourself; only EXTRACT time tokens into a `when` object (code resolves them, defaulting to now if empty). `when` fields (include only those mentioned, or set when to {} for 'send now'): in_minutes, in_hours, in_days, weekday, weekday_next, month, day, year, hour (0-23; '2pm'=>14), minute. Output keys: when (token object, {} = now), message (the notification text).",
+        "prompt": "{{input.text}}"
+      }
+    },
+    {
+      "id": "dt",
+      "type": "datetime",
+      "position": { "x": 600, "y": 160 },
+      "data": { "label": "Resolve time", "spec": "{{parse.json.when}}", "tz": "{{input.tz}}", "default_hour": "9", "duration_minutes": "0" }
+    },
+    {
+      "id": "schedule_1",
+      "type": "schedule",
+      "position": { "x": 880, "y": 160 },
+      "data": { "label": "Schedule push", "fire_at": "{{dt.rfc3339}}", "chat_id": "{{input.chat_id}}", "message": "{{parse.json.message}}", "page_id": "", "properties_json": "" }
+    },
+    {
+      "id": "out",
+      "type": "output",
+      "position": { "x": 1160, "y": 160 },
+      "data": { "label": "Confirm", "value": "🔔 Notification set for {{dt.human}}." }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "trigger_1", "target": "parse" },
+    { "id": "e2", "source": "parse", "target": "dt" },
+    { "id": "e3", "source": "dt", "target": "schedule_1" },
+    { "id": "e4", "source": "schedule_1", "target": "out" }
+  ]
+}

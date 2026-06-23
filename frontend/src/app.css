@@ -1,0 +1,72 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #0b0e14;
+  color: #e6e9ef;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* Svelte Flow dark theming.
+   xyflow ships a light default theme; without overriding its CSS variables the
+   Controls, MiniMap and attribution render white. Set them all here so the app
+   is dark on its own (no Dark Reader needed). */
+.svelte-flow {
+  --xy-background-color: #0b0e14;
+  --xy-edge-stroke: #4b5675;
+  --xy-edge-stroke-default: #4b5675;
+  --xy-edge-stroke-selected: #6d4bff;
+  --xy-connectionline-stroke: #6d4bff;
+
+  --xy-controls-button-background-color: #151a26;
+  --xy-controls-button-background-color-hover: #1f2738;
+  --xy-controls-button-color: #c2c9d6;
+  --xy-controls-button-color-hover: #ffffff;
+  --xy-controls-button-border-color: #2a3242;
+
+  --xy-minimap-background-color: #0d111b;
+  --xy-minimap-mask-background-color: rgba(11, 14, 20, 0.7);
+
+  --xy-attribution-background-color: transparent;
+
+  --xy-node-background-color: #151a26;
+  --xy-node-border-default: #2a3242;
+  --xy-node-color: #e6e9ef;
+
+  background: #0b0e14;
+}
+.svelte-flow__edge-path {
+  stroke: #4b5675;
+  stroke-width: 2;
+}
+.svelte-flow__handle {
+  width: 10px;
+  height: 10px;
+  background: #6b7bb5;
+  border: 2px solid #0b0e14;
+}
+.svelte-flow__controls {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.svelte-flow__controls-button {
+  border-bottom-color: #2a3242 !important;
+}
+.svelte-flow__controls-button svg {
+  fill: currentColor;
+}
+.svelte-flow__minimap {
+  border: 1px solid #1c2333;
+  border-radius: 8px;
+}
+.svelte-flow__attribution {
+  color: #586075;
+}
+.svelte-flow__attribution a {
+  color: #586075;
+}
