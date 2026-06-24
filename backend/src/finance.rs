@@ -67,6 +67,14 @@ fn is_student_loan(desc: &str) -> bool {
     lc.contains("nslsc") || lc.contains("student loan")
 }
 
+/// True if `desc` is a transfer to a savings/investment account (Wealthsimple) →
+/// a Transfer tagged "Savings" so it's excluded from spending but shown as money
+/// put away rather than lost.
+fn is_savings(desc: &str) -> bool {
+    let lc = desc.to_lowercase();
+    lc.contains("ws investments") || lc.contains("wealthsimple")
+}
+
 // ---- Notion property extractors ---------------------------------------------
 
 fn prop_number(props: &Value, key: &str) -> f64 {
@@ -174,6 +182,7 @@ async fn period_balance(
     let mut other_income = 0.0;
     let mut expense_total = 0.0;
     let mut refund_total = 0.0;
+    let mut savings_total = 0.0;
     let mut by_cat: Vec<(String, f64)> = Vec::new();
     for p in &pages {
         let props = &p["properties"];
@@ -188,8 +197,13 @@ async fn period_balance(
                     other_income += amount;
                 }
             }
-            // Card payments / inter-account moves: not income, not spending — skip.
-            "Transfer" => {}
+            // Card payments / inter-account moves: not income, not spending. A
+            // savings transfer is still excluded from net but tracked as a memo.
+            "Transfer" => {
+                if prop_select(props, "Category").eq_ignore_ascii_case("Savings") {
+                    savings_total += amount;
+                }
+            }
             // Merchant refund: money back, nets against spending (not income).
             "Refund" => refund_total += amount,
             _ => {
@@ -264,6 +278,13 @@ async fn period_balance(
         net_dot,
         money(net)
     ));
+    if savings_total > 0.0 {
+        // Memo: money moved to savings (still yours, so not part of Net).
+        rows.push_str(&format!(
+            "<tr><td>Saved → 💰</td><td>{}</td></tr>",
+            money(savings_total)
+        ));
+    }
     let mut html = format!(
         "<b>{}</b>\n<blockquote>{}</blockquote>\n<table>{}</table>",
         title, range, rows
@@ -280,6 +301,9 @@ async fn period_balance(
         fb.push_str(&format!("  {cat}: {}\n", money(*amt)));
     }
     fb.push_str(&format!("Net: {}", money(net)));
+    if savings_total > 0.0 {
+        fb.push_str(&format!("\nSaved: {}", money(savings_total)));
+    }
 
     Ok((html, fb))
 }
@@ -397,6 +421,8 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
             ("Expense", "Housing".to_string())
         } else if is_student_loan(&r.description) {
             ("Expense", "Loans".to_string())
+        } else if is_savings(&r.description) {
+            ("Transfer", "Savings".to_string())
         } else {
             (direction, category)
         };
