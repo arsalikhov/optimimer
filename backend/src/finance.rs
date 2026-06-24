@@ -16,10 +16,10 @@ use std::hash::{Hash, Hasher};
 /// Expense categories the LLM must choose from (income rows are categorized "Income").
 const CATEGORY_LIST: &[&str] = &[
     "Groceries", "Dining", "Transport", "Housing", "Utilities", "Health",
-    "Entertainment", "Shopping", "Subscriptions", "Travel", "Cash", "Other",
+    "Entertainment", "Shopping", "Subscriptions", "Travel", "Loans", "Cash", "Other",
 ];
 const CATEGORIES: &str =
-    "Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Cash, Other";
+    "Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Loans, Cash, Other";
 
 /// Snap an LLM-returned category onto the known set (case-insensitive), falling
 /// back to "Other". Stops the model from inventing junk Notion select options
@@ -58,6 +58,13 @@ fn is_rent(desc: &str, amount: f64, rents: &[f64]) -> bool {
     let lc = desc.to_lowercase();
     let etransfer = lc.contains("interac") || lc.contains("etrnsfr") || lc.contains("e-transfer");
     etransfer && rents.iter().any(|a| (a - amount.abs()).abs() < 0.005)
+}
+
+/// True if `desc` is a student-loan payment (NSLSC = National Student Loans
+/// Service Centre) → a Loans expense, not generic "Other".
+fn is_student_loan(desc: &str) -> bool {
+    let lc = desc.to_lowercase();
+    lc.contains("nslsc") || lc.contains("student loan")
 }
 
 // ---- Notion property extractors ---------------------------------------------
@@ -384,10 +391,12 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
             // junk Notion options or guess a category from an ATM's street name.
             _ => clamp_category(&r.category),
         };
-        // Rent override: an exact-amount rent e-transfer is a Housing expense,
-        // not whatever the model guessed (Transfer/Other).
+        // Deterministic overrides for known recurring payees the model otherwise
+        // mislabels: rent e-transfers → Housing, NSLSC → Loans.
         let (direction, category) = if is_rent(&r.description, r.amount, &rents) {
             ("Expense", "Housing".to_string())
+        } else if is_student_loan(&r.description) {
+            ("Expense", "Loans".to_string())
         } else {
             (direction, category)
         };
@@ -441,7 +450,7 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
          Direction meanings: \"Expense\" = a real purchase/charge/fee/bill or money spent; \"Refund\" = a merchant credit reversing a purchase (a return) or a fee rebate (money back, reduces spending); \"Transfer\" = a payment toward a credit card, a move between your OWN accounts, or an investment contribution (NOT income, NOT spending); \"Income\" = real money in (payroll/wages, government/tax deposit, interest, or an Interac e-transfer RECEIVED).\n\
          CREDIT-CARD statement: a POSITIVE amount is a purchase → \"Expense\"; a NEGATIVE amount is a credit → \"Refund\" if it's a merchant return, or \"Transfer\" if it's a card payment ('PAYMENT RECEIVED', 'THANK YOU', a 'TF'/transfer from a bank account). A credit card has NO \"Income\".\n\
          CHEQUING statement: payroll ('PAY/PAY', wages, direct deposit) → \"Income\" category \"Salary\"; government/tax deposit, interest, or Interac e-transfer RECEIVED → \"Income\"; a fee rebate → \"Refund\"; a transfer to a credit card ('TF <long card number>', 'AMEX … PYMT/FTD/BILL'), a move between your own accounts, or an investment ('WS INVESTMENTS','INV/PLA') → \"Transfer\"; a bill, purchase, insurance, fee, or Interac e-transfer SENT → \"Expense\".\n\
-         An ABM/ATM cash withdrawal — a bank-machine withdrawal, often shown only as a street address or location with a code like '[IB]', 'ABM', 'ATM', or 'WITHDRAWAL' and no merchant — is an \"Expense\" with category \"Cash\"; NEVER infer a category from the street name/address of such a row.\n\
+         An ABM/ATM cash withdrawal — a bank-machine withdrawal, often shown only as a street address or location with a code like '[IB]', 'ABM', 'ATM', or 'WITHDRAWAL' and no merchant — is an \"Expense\" with category \"Cash\"; NEVER infer a category from the street name/address of such a row. A student-loan payment ('NSLSC' / 'student loan') is an \"Expense\" with category \"Loans\".\n\
          For \"Expense\" choose the best category; use \"Salary\" ONLY for payroll. One element per transaction row; ignore header rows, opening/closing balance lines, and blank rows. If a date is missing use {today}; normalize all dates to YYYY-MM-DD."
     );
     let body = json!({

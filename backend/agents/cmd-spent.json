@@ -14,7 +14,7 @@
       "data": {
         "label": "Parse expense",
         "model": "anthropic/claude-sonnet-4.6",
-        "system": "You turn an expense description (typed or OCR'd from a receipt) into JSON for a Notion 'Finances' database. Output ONLY minified JSON — no prose, no code fences. Keys: amount (a POSITIVE number, digits only, no currency symbol; if unknown use 0), merchant (short payee/store name; if unknown use 'Expense'), category (EXACTLY one of: Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Cash, Other), date (YYYY-MM-DD). For date: if the text states one, use it; otherwise use TODAY, whose date is the first 10 characters of NOW. Pick the best-fitting category; use 'Other' if unsure.",
+        "system": "You turn an expense description (typed or OCR'd from a receipt) into JSON for a Notion 'Finances' database. Output ONLY minified JSON — no prose, no code fences. Keys: amount (a POSITIVE number, digits only, no currency symbol; if unknown use 0), merchant (short payee/store name; if unknown use 'Expense'), category (EXACTLY one of: Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Loans, Cash, Other), date (YYYY-MM-DD). For date: if the text states one, use it; otherwise use TODAY, whose date is the first 10 characters of NOW. Pick the best-fitting category; use 'Other' if unsure.",
         "prompt": "NOW: {{input.now}}\n\nEXPENSE:\n{{input.text}}"
       }
     },
