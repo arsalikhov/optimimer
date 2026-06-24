@@ -1,17 +1,20 @@
+use crate::db::Db;
 use crate::engine;
 use crate::models::{RunResponse, Workflow};
 use crate::store::Store;
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Long-polling Telegram bot — the primary way to drive agents.
 ///
 /// Two ways to run an agent:
 ///   * Pick one (`/use <id>` or tap a button) and send plain text — it becomes `{{input}}`.
-///   * Use a slash command (`/notion`, `/remind`, `/complete`, `/notify`, `/email`).
+///   * Use a slash command (`/todo`, `/complete`, `/notify`, `/email`).
 ///     Each maps to the saved agent `cmd-<name>` and receives a structured input:
 ///     `{ text, now, tz, category, chat_id, command }`.
 ///
@@ -24,11 +27,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// No-op (with a log line) when TELEGRAM_BOT_TOKEN is unset.
 
 /// Slash commands that route to a `cmd-<name>` agent.
-const COMMANDS: &[&str] = &["notion", "remind", "complete", "notify", "email", "note"];
+const COMMANDS: &[&str] = &["todo", "complete", "notify", "email", "note", "search_notes", "search_tasks", "list_todos", "list_notes", "spent", "earned"];
 
-/// Emitted by the `/notion` agent's Output when the LLM can't tell Sagemesh from
+/// Emitted by a command agent's Output when the LLM can't tell Sagemesh from
 /// Personal; the bot turns it into a two-button prompt and re-runs with the answer.
 const ASK_CATEGORY: &str = "ASK_CATEGORY";
+
+/// An agent Output beginning with this marker is sent as a rich (HTML) message
+/// via sendRichMessage instead of plain Markdown. The marker is stripped first.
+const RICH_SENTINEL: &str = "<!rich>";
 
 /// A command awaiting the Sagemesh/Personal answer for a given chat.
 #[derive(Clone)]
@@ -41,23 +48,92 @@ struct Pending {
 struct BotState {
     store: Store,
     active: Arc<Mutex<HashMap<i64, String>>>,
-    tz: Arc<Mutex<HashMap<i64, String>>>,
     pending: Arc<Mutex<HashMap<i64, Pending>>>,
-    tz_path: PathBuf,
+    db: Db,
+    /// Chat ids permitted to use the bot. A public bot is discoverable, so every
+    /// inbound update is gated against this set (built from TELEGRAM_ALLOWED_CHAT_IDS).
+    /// Deny-by-default: an empty set rejects everyone.
+    allowed: Arc<HashSet<i64>>,
 }
-
-/// A bot reply: text plus an optional reply markup (inline or reply keyboard).
-struct Reply {
-    text: String,
-    keyboard: Option<Value>,
-}
-impl Reply {
-    fn text(s: impl Into<String>) -> Self {
-        Reply { text: s.into(), keyboard: None }
+impl BotState {
+    fn is_allowed(&self, chat_id: i64) -> bool {
+        self.allowed.contains(&chat_id)
     }
 }
 
-pub async fn run_bot(store: Store) {
+/// Per-chat running shopping lists (see `/buy_later`, `/groceries`). Persisted as
+/// JSON next to the other bot state; no Notion/calendar involvement — these are
+/// throwaway lists you add to and clear.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct ChatLists {
+    #[serde(default)]
+    groceries: Vec<String>,
+    #[serde(default)]
+    other: Vec<String>,
+}
+
+/// Which of a chat's two lists a command targets.
+#[derive(Clone, Copy)]
+enum ListKind {
+    Grocery,
+    Other,
+}
+impl ListKind {
+    fn items<'a>(&self, l: &'a ChatLists) -> &'a Vec<String> {
+        match self {
+            ListKind::Grocery => &l.groceries,
+            ListKind::Other => &l.other,
+        }
+    }
+    fn items_mut<'a>(&self, l: &'a mut ChatLists) -> &'a mut Vec<String> {
+        match self {
+            ListKind::Grocery => &mut l.groceries,
+            ListKind::Other => &mut l.other,
+        }
+    }
+    fn noun(&self) -> &'static str {
+        match self {
+            ListKind::Grocery => "grocery",
+            ListKind::Other => "to-buy",
+        }
+    }
+    fn title(&self) -> &'static str {
+        match self {
+            ListKind::Grocery => "Groceries",
+            ListKind::Other => "To buy",
+        }
+    }
+}
+
+/// A bot reply. `text` is the plain content (also the fallback). If `rich_html`
+/// is set, it's sent via `sendRichMessage` (real tables, collapsible blocks, …),
+/// falling back to plain `text` if that call fails.
+#[derive(Default)]
+struct Reply {
+    text: String,
+    keyboard: Option<Value>,
+    rich_html: Option<String>,
+}
+impl Reply {
+    fn text(s: impl Into<String>) -> Self {
+        Reply {
+            text: s.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A rich (HTML) reply. `fallback` is sent as plain text if the rich send
+    /// fails — e.g. an older client or an API rejection.
+    fn rich(html: impl Into<String>, fallback: impl Into<String>) -> Self {
+        Reply {
+            text: fallback.into(),
+            keyboard: None,
+            rich_html: Some(html.into()),
+        }
+    }
+}
+
+pub async fn run_bot(store: Store, db: Db) {
     let token = match std::env::var("TELEGRAM_BOT_TOKEN") {
         Ok(t) if !t.trim().is_empty() => t,
         _ => {
@@ -66,17 +142,33 @@ pub async fn run_bot(store: Store) {
         }
     };
 
+    // Allowlist of chat ids that may use the bot. Telegram bots are publicly
+    // discoverable, so without this anyone could drive Notion/list commands.
+    // Deny-by-default: if the var is unset/empty we reject everyone and log each
+    // caller's chat_id so the owner can find their own and add it.
+    let allowed: HashSet<i64> = std::env::var("TELEGRAM_ALLOWED_CHAT_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect();
+    if allowed.is_empty() {
+        tracing::warn!(
+            "TELEGRAM_ALLOWED_CHAT_IDS is empty — all chats are DENIED. Message the bot, \
+             find your chat_id in the 'unauthorized chat' log line below, then set the var."
+        );
+    } else {
+        tracing::info!("Telegram allowlist: {} chat id(s) authorized", allowed.len());
+    }
+
     let api = format!("https://api.telegram.org/bot{token}");
     let client = reqwest::Client::new();
-    let tz_path: PathBuf = std::env::var("OPTIMIMER_TZ_DATA")
-        .unwrap_or_else(|_| "chat_tz.json".to_string())
-        .into();
+    register_commands(&client, &api).await;
     let state = BotState {
         store,
         active: Arc::new(Mutex::new(HashMap::new())),
-        tz: Arc::new(Mutex::new(load_tz(&tz_path))),
         pending: Arc::new(Mutex::new(HashMap::new())),
-        tz_path,
+        db,
+        allowed: Arc::new(allowed),
     };
     let mut offset: i64 = 0;
 
@@ -99,6 +191,11 @@ pub async fn run_bot(store: Store) {
 
             // Button taps arrive as callback_query, not message.
             if let Some(cb) = upd.get("callback_query").filter(|c| !c.is_null()) {
+                let cb_chat = cb["message"]["chat"]["id"].as_i64().unwrap_or(0);
+                if !state.is_allowed(cb_chat) {
+                    tracing::warn!("unauthorized chat {cb_chat} (callback) — ignored");
+                    continue;
+                }
                 handle_callback(&client, &api, &state, cb).await;
                 continue;
             }
@@ -108,6 +205,14 @@ pub async fn run_bot(store: Store) {
                 Some(c) => c,
                 None => continue,
             };
+
+            // Authorization gate. Reject anyone not on the allowlist before any
+            // command runs, and log their chat_id so the owner can allowlist it.
+            if !state.is_allowed(chat_id) {
+                tracing::warn!("unauthorized chat {chat_id} — denied (add to TELEGRAM_ALLOWED_CHAT_IDS)");
+                send(&client, &api, chat_id, &Reply::text("Not authorized.")).await;
+                continue;
+            }
 
             // A shared location updates this chat's timezone (used for reminders).
             if let Some(loc) = msg.get("location").filter(|l| !l.is_null()) {
@@ -129,6 +234,34 @@ pub async fn run_bot(store: Store) {
                 continue;
             }
 
+            // Photo of a receipt/invoice → OCR → log as an expense via /spent.
+            if let Some(photos) = msg.get("photo").and_then(|p| p.as_array()).filter(|a| !a.is_empty()) {
+                // Telegram sends multiple sizes ascending; the last is the largest.
+                if let Some(fid) = photos.last().and_then(|p| p["file_id"].as_str()) {
+                    handle_receipt(&client, &api, &token, &state, chat_id, fid, "image/jpeg").await;
+                }
+                continue;
+            }
+
+            // A document: a CSV statement → bulk import; an image → treat as a receipt.
+            if let Some(doc) = msg.get("document").filter(|d| !d.is_null()) {
+                let name = doc["file_name"].as_str().unwrap_or("").to_lowercase();
+                let mime = doc["mime_type"].as_str().unwrap_or("").to_string();
+                let caption = msg["caption"].as_str().unwrap_or("");
+                if let Some(fid) = doc["file_id"].as_str() {
+                    if name.ends_with(".csv") || mime.contains("csv") || mime == "text/comma-separated-values" {
+                        handle_csv(&client, &api, &token, &state, chat_id, fid, &name, caption).await;
+                    } else if mime.starts_with("image/") {
+                        handle_receipt(&client, &api, &token, &state, chat_id, fid, &mime).await;
+                    } else {
+                        send(&client, &api, chat_id, &Reply::text(
+                            "Send a receipt photo to log an expense, or a .csv statement to import transactions.",
+                        )).await;
+                    }
+                }
+                continue;
+            }
+
             let text = msg["text"].as_str().unwrap_or("").trim().to_string();
             if text.is_empty() {
                 continue;
@@ -142,7 +275,45 @@ pub async fn run_bot(store: Store) {
 
 async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
     if text.starts_with("/start") || text.starts_with("/agents") {
-        return agents_reply(&state.store, "👋 *Optimimer*\nTap an agent to select it, then send a message to run it.\n\nOr use a command: /notion /remind /complete /notify /email");
+        // Rich HTML. Rich messages render like real HTML (newlines collapse), so
+        // structure comes from block tags — <blockquote> and <ul>/<li> — not \n.
+        // Underscores stay literal here, and Telegram auto-highlights the (now
+        // valid) command tokens inside the list items.
+        return agents_reply(
+            &state.store,
+            "<b>Optimimer</b>\
+             <blockquote>Tap an agent below to select it, then send a message to run it.</blockquote>\
+             <b>Capture</b>\
+             <ul>\
+             <li>/todo — add a calendar-synced task</li>\
+             <li>/note — save a quick note</li>\
+             <li>/complete — mark something done</li>\
+             <li>/notify — schedule a reminder</li>\
+             <li>/email — draft and send an email</li>\
+             </ul>\
+             <b>Search</b>\
+             <ul>\
+             <li>/search_notes — find notes</li>\
+             <li>/search_tasks — find tasks</li>\
+             <li>/list_todos — show the 5 newest tasks</li>\
+             <li>/list_notes — show the 5 newest notes</li>\
+             </ul>\
+             <b>Money</b>\
+             <ul>\
+             <li>/spent — log an expense (text or a receipt photo)</li>\
+             <li>/earned — log income received</li>\
+             <li>/balance — income vs expenses (add 'last'/a number for past weeks, or a month like 'june')</li>\
+             <li>/set_income — set your monthly income</li>\
+             <li>send a .csv statement to bulk-import (duplicates skipped)</li>\
+             </ul>\
+             <b>Lists</b>\
+             <ul>\
+             <li>/buy_later — add an item (auto-sorts grocery vs other)</li>\
+             <li>/groceries — show grocery list · /clear_groceries — clear it</li>\
+             <li>/to_buy — show non-grocery list · /clear_to_buy — clear it</li>\
+             </ul>",
+            true,
+        );
     }
 
     if let Some(arg) = text.strip_prefix("/use") {
@@ -150,23 +321,27 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         return match resolve_agent(&state.store, q) {
             Some(wf) => {
                 state.active.lock().unwrap().insert(chat_id, wf.id.clone());
-                Reply::text(format!("✅ Active agent: *{}*\nSend a message to run it.", wf.name))
+                Reply::text(format!(
+                    "Active agent: *{}*\nSend a message to run it.",
+                    wf.name
+                ))
             }
-            None => agents_reply(&state.store, &format!("No agent matching '{q}'. Pick one:")),
+            None => agents_reply(&state.store, &format!("No agent matching '{q}'. Pick one:"), false),
         };
     }
 
     if text.starts_with("/where") {
         return Reply {
             text: format!(
-                "📍 Tap below to share your location — I'll set your timezone so reminders fire at the right time.\nCurrent timezone: *{}*",
+                "Tap below to share your location — I'll set your timezone so reminders fire at the right time.\nCurrent timezone: *{}*",
                 tz_for(state, chat_id)
             ),
             keyboard: Some(json!({
-                "keyboard": [[{ "text": "📍 Share location", "request_location": true }]],
+                "keyboard": [[{ "text": "Share location", "request_location": true }]],
                 "resize_keyboard": true,
                 "one_time_keyboard": true
             })),
+            rich_html: None,
         };
     }
 
@@ -178,9 +353,11 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         return match name.parse::<chrono_tz::Tz>() {
             Ok(_) => {
                 set_tz(state, chat_id, name);
-                Reply::text(format!("✅ Timezone set to *{name}*."))
+                Reply::text(format!("Timezone set to *{name}*."))
             }
-            Err(_) => Reply::text(format!("'{name}' isn't a valid IANA timezone (try e.g. `Europe/London`).")),
+            Err(_) => Reply::text(format!(
+                "'{name}' isn't a valid IANA timezone (try e.g. `Europe/London`)."
+            )),
         };
     }
 
@@ -189,6 +366,19 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or("").to_lowercase();
         let body = parts.next().unwrap_or("").trim();
+
+        // Local shopping lists (no agent, no Notion — just per-chat JSON state).
+        match cmd.as_str() {
+            "buy_later" => return handle_buy_later(state, chat_id, body).await,
+            "groceries" => return list_reply(state, chat_id, ListKind::Grocery),
+            "clear_groceries" => return clear_reply(state, chat_id, ListKind::Grocery),
+            "to_buy" => return list_reply(state, chat_id, ListKind::Other),
+            "clear_to_buy" => return clear_reply(state, chat_id, ListKind::Other),
+            "set_income" | "income" => return handle_set_income(state, chat_id, body),
+            "balance" => return handle_balance(state, chat_id, body).await,
+            _ => {}
+        }
+
         if COMMANDS.contains(&cmd.as_str()) {
             if body.is_empty() {
                 return Reply::text(format!("Usage: `/{cmd} <what you want>`"));
@@ -210,8 +400,9 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
 /// The two category buttons shown when a command needs a "which bucket?" answer.
 /// Defaults are this project's own labels — override `CATEGORY_A` / `CATEGORY_B`
 /// in the env to adapt them to your domain (e.g. "Work" / "Home") without touching
-/// code. This is just the button text; `agents/cmd-notion.json` is where the answer
-/// is mapped onto your Notion schema — fork that agent to change the mapping.
+/// code. This is just the button text; a command agent's Output emits
+/// `ASK_CATEGORY` to trigger this prompt, and that agent is where the answer is
+/// mapped onto your Notion schema — fork it to change the mapping.
 fn category_labels() -> (String, String) {
     (
         std::env::var("CATEGORY_A").unwrap_or_else(|_| "Sagemesh".to_string()),
@@ -221,10 +412,16 @@ fn category_labels() -> (String, String) {
 
 /// Run a `cmd-<name>` agent with structured input. Handles the category
 /// confirmation: if the agent asks, stash the request and show two buttons.
-async fn run_command(state: &BotState, chat_id: i64, cmd: &str, text: &str, category: &str) -> Reply {
+async fn run_command(
+    state: &BotState,
+    chat_id: i64,
+    cmd: &str,
+    text: &str,
+    category: &str,
+) -> Reply {
     let wf = match state.store.get(&format!("cmd-{cmd}")) {
         Some(w) => w,
-        None => return Reply::text(format!("⚠️ The `/{cmd}` agent isn't installed (expected agent id `cmd-{cmd}`). Restart the backend to seed it, or build it in the web UI.")),
+        None => return Reply::text(format!("The `/{cmd}` agent isn't installed (expected agent id `cmd-{cmd}`). Restart the backend to seed it, or build it in the web UI.")),
     };
 
     let tz = tz_for(state, chat_id);
@@ -242,20 +439,62 @@ async fn run_command(state: &BotState, chat_id: i64, cmd: &str, text: &str, cate
     let body = output_text(&result).unwrap_or_default();
 
     if body.trim_start().starts_with(ASK_CATEGORY) {
-        state.pending.lock().unwrap().insert(chat_id, Pending { command: cmd.to_string(), text: text.to_string() });
+        state.pending.lock().unwrap().insert(
+            chat_id,
+            Pending {
+                command: cmd.to_string(),
+                text: text.to_string(),
+            },
+        );
         let (cat_a, cat_b) = category_labels();
         return Reply {
             text: format!("Is this for *{cat_a}* or *{cat_b}*?"),
             keyboard: Some(json!({
                 "inline_keyboard": [[
-                    { "text": format!("🏢 {cat_a}"), "callback_data": "cat:sagemesh" },
-                    { "text": format!("🙂 {cat_b}"), "callback_data": "cat:personal" }
+                    { "text": cat_a.clone(), "callback_data": "cat:sagemesh" },
+                    { "text": cat_b.clone(), "callback_data": "cat:personal" }
                 ]]
             })),
+            rich_html: None,
         };
     }
 
+    // An agent can opt into a rich (HTML) reply by prefixing its Output with the
+    // sentinel; it then owns the full formatting (tables, collapsible blocks, …).
+    if let Some(html) = body.trim_start().strip_prefix(RICH_SENTINEL) {
+        let html = html.trim_start().to_string();
+        let fallback = strip_tags(&html);
+        return Reply::rich(html, fallback);
+    }
+
     Reply::text(format_result(&wf.name, &result))
+}
+
+/// Crude HTML→plain-text for the rich-message fallback: drop tags, unescape the
+/// entities we emit. Good enough for the rare older-client / API-error path.
+fn strip_tags(html: &str) -> String {
+    // Turn block boundaries into newlines so the fallback stays readable.
+    let html = html
+        .replace("</li>", "\n")
+        .replace("</tr>", "\n")
+        .replace("</blockquote>", "\n")
+        .replace("</ul>", "\n")
+        .replace("</table>", "\n");
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }
 
 async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, cb: &Value) {
@@ -270,7 +509,16 @@ async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, 
         if let Some(wf) = state.store.get(id) {
             state.active.lock().unwrap().insert(chat, wf.id.clone());
             note = format!("Active: {}", wf.name);
-            send(client, api, chat, &Reply::text(format!("✅ Active agent: *{}*\nSend a message to run it.", wf.name))).await;
+            send(
+                client,
+                api,
+                chat,
+                &Reply::text(format!(
+                    "Active agent: *{}*\nSend a message to run it.",
+                    wf.name
+                )),
+            )
+            .await;
         }
     }
 
@@ -282,7 +530,13 @@ async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, 
             let reply = run_command(state, chat, &p.command, &p.text, category).await;
             send(client, api, chat, &reply).await;
         } else {
-            send(client, api, chat, &Reply::text("That prompt expired — send the command again.")).await;
+            send(
+                client,
+                api,
+                chat,
+                &Reply::text("That prompt expired — send the command again."),
+            )
+            .await;
         }
     }
 
@@ -295,38 +549,99 @@ async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, 
 
 /// Download a voice note, transcribe it, then route the transcript to a command
 /// via the `cmd-route` agent (falling back to the active agent if routing fails).
-async fn handle_voice(client: &reqwest::Client, api: &str, token: &str, state: &BotState, chat_id: i64, file_id: &str) {
+async fn handle_voice(
+    client: &reqwest::Client,
+    api: &str,
+    token: &str,
+    state: &BotState,
+    chat_id: i64,
+    file_id: &str,
+) {
     let file_path = match get_file_path(client, api, file_id).await {
         Some(p) => p,
-        None => return send(client, api, chat_id, &Reply::text("⚠️ Couldn't fetch that voice message.")).await,
+        None => {
+            return send(
+                client,
+                api,
+                chat_id,
+                &Reply::text("Couldn't fetch that voice message."),
+            )
+            .await
+        }
     };
     let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
     let audio = match client.get(&url).send().await.ok() {
         Some(r) => match r.bytes().await {
             Ok(b) => b.to_vec(),
-            Err(_) => return send(client, api, chat_id, &Reply::text("⚠️ Couldn't download the audio.")).await,
+            Err(_) => {
+                return send(
+                    client,
+                    api,
+                    chat_id,
+                    &Reply::text("Couldn't download the audio."),
+                )
+                .await
+            }
         },
-        None => return send(client, api, chat_id, &Reply::text("⚠️ Couldn't download the audio.")).await,
+        None => {
+            return send(
+                client,
+                api,
+                chat_id,
+                &Reply::text("Couldn't download the audio."),
+            )
+            .await
+        }
     };
-    let format = file_path.rsplit('.').next().filter(|e| !e.is_empty()).unwrap_or("ogg").to_lowercase();
+    let format = file_path
+        .rsplit('.')
+        .next()
+        .filter(|e| !e.is_empty())
+        .unwrap_or("ogg")
+        .to_lowercase();
 
     let transcript = match crate::transcribe::transcribe(audio, &format).await {
         Ok(t) => t,
-        Err(e) => return send(client, api, chat_id, &Reply::text(format!("⚠️ Transcription failed: {e}"))).await,
+        Err(e) => {
+            return send(
+                client,
+                api,
+                chat_id,
+                &Reply::text(format!("Transcription failed: {e}")),
+            )
+            .await
+        }
     };
     if transcript.trim().is_empty() {
-        return send(client, api, chat_id, &Reply::text("🎤 I didn't catch that — try again?")).await;
+        return send(
+            client,
+            api,
+            chat_id,
+            &Reply::text("I didn't catch that — try again?"),
+        )
+        .await;
     }
-    send(client, api, chat_id, &Reply::text(format!("🎤 _{transcript}_"))).await;
+    send(
+        client,
+        api,
+        chat_id,
+        &Reply::text(format!("_{transcript}_")),
+    )
+    .await;
 
     // Route to a command via the cmd-route agent (returns {command, text}).
     if let Some(wf) = state.store.get("cmd-route") {
         let tz = tz_for(state, chat_id);
         let input = json!({ "text": transcript, "now": now_in_tz(&tz), "tz": tz, "chat_id": chat_id.to_string() });
         let result = engine::run(&wf, input).await;
-        if let Ok(route) = serde_json::from_str::<Value>(&output_text(&result).unwrap_or_default()) {
+        if let Ok(route) = serde_json::from_str::<Value>(&output_text(&result).unwrap_or_default())
+        {
             let cmd = route["command"].as_str().unwrap_or("").to_lowercase();
-            let text = route["text"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(transcript.as_str());
+            let text = route["text"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(transcript.as_str());
             if COMMANDS.contains(&cmd.as_str()) {
                 let reply = run_command(state, chat_id, &cmd, text, "").await;
                 return send(client, api, chat_id, &reply).await;
@@ -335,6 +650,92 @@ async fn handle_voice(client: &reqwest::Client, api: &str, token: &str, state: &
     }
     // Fallback: treat the transcript as a normal message.
     let reply = handle_message(state, chat_id, &transcript).await;
+    send(client, api, chat_id, &reply).await;
+}
+
+/// Download a Telegram file's bytes by file_id (getFile → download URL).
+async fn download_file(
+    client: &reqwest::Client,
+    api: &str,
+    token: &str,
+    file_id: &str,
+) -> Option<Vec<u8>> {
+    let file_path = get_file_path(client, api, file_id).await?;
+    let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+    let bytes = client.get(&url).send().await.ok()?.bytes().await.ok()?;
+    Some(bytes.to_vec())
+}
+
+/// Receipt/invoice image → OCR to a "Spent X at Y on Z" line → run `/spent`,
+/// which parses + categorizes it like any typed expense.
+async fn handle_receipt(
+    client: &reqwest::Client,
+    api: &str,
+    token: &str,
+    state: &BotState,
+    chat_id: i64,
+    file_id: &str,
+    mime: &str,
+) {
+    let bytes = match download_file(client, api, token, file_id).await {
+        Some(b) => b,
+        None => return send(client, api, chat_id, &Reply::text("Couldn't download that image.")).await,
+    };
+    let sentence = match crate::vision::read_receipt(bytes, mime).await {
+        Ok(s) => s,
+        Err(e) => return send(client, api, chat_id, &Reply::text(format!("Couldn't read the receipt: {e}"))).await,
+    };
+    send(client, api, chat_id, &Reply::text(format!("_{sentence}_"))).await;
+    let reply = run_command(state, chat_id, "spent", &sentence, "").await;
+    send(client, api, chat_id, &reply).await;
+}
+
+/// CSV bank/credit-card statement → bulk import into Finances, skipping rows whose
+/// fingerprint already exists (so re-imports don't duplicate).
+async fn handle_csv(
+    client: &reqwest::Client,
+    api: &str,
+    token: &str,
+    state: &BotState,
+    chat_id: i64,
+    file_id: &str,
+    file_name: &str,
+    caption: &str,
+) {
+    let bytes = match download_file(client, api, token, file_id).await {
+        Some(b) => b,
+        None => return send(client, api, chat_id, &Reply::text("Couldn't download that file.")).await,
+    };
+    let csv = String::from_utf8_lossy(&bytes).to_string();
+    // Detect account type (Amex 'activity' = credit; BMO 'statement' = credit or
+    // chequing, told apart by the header) so credits are read correctly.
+    let account = crate::finance::detect_account(file_name, caption, &csv);
+    let label = if account.is_empty() { "auto-detecting type".to_string() } else { format!("{account} statement") };
+    send(client, api, chat_id, &Reply::text(format!("Importing transactions ({label})…"))).await;
+    let tz = tz_for(state, chat_id);
+    let today: String = now_in_tz(&tz).chars().take(10).collect();
+    let reply = match crate::finance::import_csv(&csv, &today, account).await {
+        Ok(s) if s.parsed == 0 => Reply::text("No transactions found in that CSV."),
+        Ok(s) => {
+            let mut msg = format!(
+                "Imported *{}* transaction{} — skipped *{}* duplicate{} ({} parsed).",
+                s.created,
+                if s.created == 1 { "" } else { "s" },
+                s.skipped,
+                if s.skipped == 1 { "" } else { "s" },
+                s.parsed,
+            );
+            if s.transfers > 0 {
+                msg.push_str(&format!(
+                    "\n{} card payment/transfer{} logged but excluded from /balance.",
+                    s.transfers,
+                    if s.transfers == 1 { "" } else { "s" }
+                ));
+            }
+            Reply::text(msg)
+        }
+        Err(e) => Reply::text(format!("CSV import failed: {e}")),
+    };
     send(client, api, chat_id, &reply).await;
 }
 
@@ -362,7 +763,10 @@ fn handle_location(state: &BotState, chat_id: i64, loc: &Value) -> Reply {
                 return Reply::text("Couldn't resolve a timezone from that location.");
             }
             set_tz(state, chat_id, &tz);
-            Reply::text(format!("📍 Timezone set to *{tz}* — reminders will use this. Local time is now {}.", now_in_tz(&tz)))
+            Reply::text(format!(
+                "Timezone set to *{tz}* — reminders will use this. Local time is now {}.",
+                now_in_tz(&tz)
+            ))
         }
         _ => Reply::text("That location didn't include coordinates."),
     }
@@ -381,29 +785,322 @@ fn default_tz() -> String {
 }
 
 fn tz_for(state: &BotState, chat_id: i64) -> String {
-    state.tz.lock().unwrap().get(&chat_id).cloned().unwrap_or_else(default_tz)
+    let conn = state.db.lock();
+    conn.query_row("SELECT tz FROM chat_tz WHERE chat_id = ?1", params![chat_id], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .unwrap_or_else(default_tz)
 }
 
 fn set_tz(state: &BotState, chat_id: i64, tz: &str) {
-    let mut map = state.tz.lock().unwrap();
-    map.insert(chat_id, tz.to_string());
-    if let Ok(json) = serde_json::to_string_pretty(&*map) {
-        let _ = std::fs::write(&state.tz_path, json);
+    let conn = state.db.lock();
+    let _ = conn.execute(
+        "INSERT INTO chat_tz (chat_id, tz) VALUES (?1, ?2)
+         ON CONFLICT(chat_id) DO UPDATE SET tz = excluded.tz",
+        params![chat_id, tz],
+    );
+}
+
+/// A chat's configured monthly income (0 if unset).
+fn monthly_income(state: &BotState, chat_id: i64) -> f64 {
+    let conn = state.db.lock();
+    conn.query_row(
+        "SELECT monthly_income FROM chat_finance WHERE chat_id = ?1",
+        params![chat_id],
+        |r| r.get::<_, f64>(0),
+    )
+    .ok()
+    .unwrap_or(0.0)
+}
+
+fn set_monthly_income(state: &BotState, chat_id: i64, amount: f64) {
+    let conn = state.db.lock();
+    let _ = conn.execute(
+        "INSERT INTO chat_finance (chat_id, monthly_income) VALUES (?1, ?2)
+         ON CONFLICT(chat_id) DO UPDATE SET monthly_income = excluded.monthly_income",
+        params![chat_id, amount],
+    );
+}
+
+/// `/set_income 5000` (or `/income` to show the current value). Drives the salary
+/// slice in `/balance`.
+fn handle_set_income(state: &BotState, chat_id: i64, body: &str) -> Reply {
+    let raw = body.trim().trim_start_matches('$').replace(',', "");
+    if raw.is_empty() {
+        let cur = monthly_income(state, chat_id);
+        if cur <= 0.0 {
+            return Reply::text("No monthly income set yet. Set it with `/set_income 5000`.");
+        }
+        return Reply::text(format!(
+            "Monthly income is *${cur:.2}* (≈ ${:.2}/week).\nChange it with `/set_income <amount>`.",
+            cur / 4.348
+        ));
+    }
+    match raw.parse::<f64>() {
+        Ok(amount) if amount >= 0.0 => {
+            set_monthly_income(state, chat_id, amount);
+            Reply::text(format!(
+                "Monthly income set to *${amount:.2}* (≈ ${:.2}/week). Used in /balance.\nSalary deposits in imported CSVs won't be double-counted while this is set. Use `/set_income 0` to count actual paychecks instead.",
+                amount / 4.348
+            ))
+        }
+        _ => Reply::text("That isn't a number. Try `/set_income 5000`."),
     }
 }
 
-fn load_tz(path: &PathBuf) -> HashMap<i64, String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+/// `/balance` — income vs expenses for a week or a month (exact math in
+/// `finance.rs`). Bare `/balance` = this week; `/balance last` / `/balance 2` =
+/// past weeks; `/balance june` / `/balance may 2025` / `/balance this month` /
+/// `/balance last month` = a calendar month.
+async fn handle_balance(state: &BotState, chat_id: i64, body: &str) -> Reply {
+    let tz = tz_for(state, chat_id);
+    let income = monthly_income(state, chat_id);
+    let result = if let Some((month, year)) = parse_month(body, &tz) {
+        crate::finance::monthly_balance(&tz, income, month, year).await
+    } else {
+        crate::finance::weekly_balance(&tz, income, parse_weeks_ago(body)).await
+    };
+    match result {
+        Ok((html, fallback)) => Reply::rich(html, fallback),
+        Err(e) => Reply::text(format!("Couldn't compute the balance: {e}")),
+    }
+}
+
+/// Parse a `/balance` argument naming a month → (month 1-12, year). Handles
+/// "this month", "last month", a month name ("june"/"jun"), and an optional
+/// explicit 4-digit year; with no year, a month after the current one is assumed
+/// to mean last year (e.g. asking for "december" in June → last December).
+fn parse_month(body: &str, tz_name: &str) -> Option<(u32, i32)> {
+    use chrono::Datelike;
+    let b = body.trim().to_lowercase();
+    if b.is_empty() {
+        return None;
+    }
+    let tz: chrono_tz::Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
+    let now = Utc::now().with_timezone(&tz);
+    let (cur_y, cur_m) = (now.year(), now.month());
+
+    if b.contains("this month") {
+        return Some((cur_m, cur_y));
+    }
+    if b.contains("last month") || b.contains("previous month") {
+        return Some(if cur_m == 1 { (12, cur_y - 1) } else { (cur_m - 1, cur_y) });
+    }
+    let abbr = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let month = abbr.iter().position(|a| b.contains(a)).map(|i| i as u32 + 1)?;
+    let year = b
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| s.parse::<i32>().ok())
+        .find(|y| (2000..3000).contains(y))
+        .unwrap_or(if month <= cur_m { cur_y } else { cur_y - 1 });
+    Some((month, year))
+}
+
+/// Parse a `/balance` argument into a week offset: "" / "this" → 0; a number → that
+/// many weeks back; "last"/"previous" → 1.
+fn parse_weeks_ago(body: &str) -> i64 {
+    let b = body.trim().to_lowercase();
+    if b.is_empty() || b.starts_with("this") {
+        return 0;
+    }
+    if let Some(n) = b
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        return n.max(0);
+    }
+    if b.contains("last") || b.contains("prev") {
+        return 1;
+    }
+    0
+}
+
+/// Read a chat's two shopping lists (empty if none stored yet).
+fn get_lists(state: &BotState, chat_id: i64) -> ChatLists {
+    let conn = state.db.lock();
+    conn.query_row("SELECT json FROM chat_lists WHERE chat_id = ?1", params![chat_id], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .and_then(|j| serde_json::from_str(&j).ok())
+    .unwrap_or_default()
+}
+
+fn put_lists(state: &BotState, chat_id: i64, lists: &ChatLists) {
+    if let Ok(json) = serde_json::to_string(lists) {
+        let conn = state.db.lock();
+        let _ = conn.execute(
+            "INSERT INTO chat_lists (chat_id, json) VALUES (?1, ?2)
+             ON CONFLICT(chat_id) DO UPDATE SET json = excluded.json",
+            params![chat_id, json],
+        );
+    }
+}
+
+/// One-time import of legacy `chat_tz.json` / `lists.json` when those tables are
+/// still empty. Files are left in place as a backup.
+pub fn migrate_json(db: &Db, tz_path: &Path, lists_path: &Path) {
+    if db.is_empty("chat_tz") && tz_path.exists() {
+        if let Some(map) = std::fs::read_to_string(tz_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<HashMap<i64, String>>(&s).ok())
+        {
+            let conn = db.lock();
+            for (chat_id, tz) in &map {
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO chat_tz (chat_id, tz) VALUES (?1, ?2)",
+                    params![chat_id, tz],
+                );
+            }
+            tracing::info!("migrated {} timezone(s) into sqlite", map.len());
+        }
+    }
+    if db.is_empty("chat_lists") && lists_path.exists() {
+        if let Some(map) = std::fs::read_to_string(lists_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<HashMap<i64, ChatLists>>(&s).ok())
+        {
+            let conn = db.lock();
+            for (chat_id, lists) in &map {
+                if let Ok(json) = serde_json::to_string(lists) {
+                    let _ = conn.execute(
+                        "INSERT OR REPLACE INTO chat_lists (chat_id, json) VALUES (?1, ?2)",
+                        params![chat_id, json],
+                    );
+                }
+            }
+            tracing::info!("migrated {} shopping list(s) into sqlite", map.len());
+        }
+    }
+}
+
+/// `/buy_later <stuff>` — split the input into items, classify each as a grocery
+/// or not, and append to the matching per-chat list.
+async fn handle_buy_later(state: &BotState, chat_id: i64, body: &str) -> Reply {
+    if body.is_empty() {
+        return Reply::text("Usage: `/buy_later milk, eggs, usb cable`");
+    }
+    let (groceries, other) = classify_items(body).await;
+    let mut lists = get_lists(state, chat_id);
+    lists.groceries.extend(groceries.iter().cloned());
+    lists.other.extend(other.iter().cloned());
+    put_lists(state, chat_id, &lists);
+
+    let mut lines = Vec::new();
+    if !groceries.is_empty() {
+        lines.push(format!("Added to groceries: {}", groceries.join(", ")));
+    }
+    if !other.is_empty() {
+        lines.push(format!("Added to to-buy: {}", other.join(", ")));
+    }
+    Reply::text(lines.join("\n"))
+}
+
+/// Ask a cheap model to split `text` into individual items and sort them into
+/// (groceries, other). Falls back to treating the whole input as one grocery
+/// line if the model is unavailable or returns something unparseable.
+async fn classify_items(text: &str) -> (Vec<String>, Vec<String>) {
+    let system = "Split the shopping input into individual items and classify each as a grocery \
+        (food, drinks, produce, pantry staples, and household consumables like paper towels, dish \
+        soap, toilet paper) or other (anything non-grocery: electronics, clothing, tools, gifts, \
+        furniture, etc.). Output ONLY minified JSON: {\"groceries\":[...],\"other\":[...]}. Each item \
+        a short lowercase phrase. No prose, no code fences.";
+    let raw = crate::openrouter::chat("anthropic/claude-haiku-4.5", system, text)
+        .await
+        .unwrap_or_default();
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        let g = str_vec(&v["groceries"]);
+        let o = str_vec(&v["other"]);
+        if !g.is_empty() || !o.is_empty() {
+            return (g, o);
+        }
+    }
+    // Couldn't classify — keep the item rather than dropping it.
+    (vec![text.trim().to_string()], vec![])
+}
+
+fn str_vec(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+fn list_reply(state: &BotState, chat_id: i64, kind: ListKind) -> Reply {
+    let lists = get_lists(state, chat_id);
+    let items = kind.items(&lists);
+    if items.is_empty() {
+        return Reply::text(format!("Your {} list is empty.", kind.noun()));
+    }
+    // Real Telegram table (sendRichMessage): a numbered row per item.
+    let rows: String = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            format!(
+                "<tr><td>{}</td><td>{}</td></tr>",
+                i + 1,
+                crate::engine::html_escape(it)
+            )
+        })
+        .collect();
+    let html = format!(
+        "<b>{} ({})</b>\n<table>{}</table>",
+        kind.title(),
+        items.len(),
+        rows
+    );
+    let fallback = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| format!("{}. {}", i + 1, it))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Reply::rich(html, format!("{} ({})\n{}", kind.title(), items.len(), fallback))
+}
+
+fn clear_reply(state: &BotState, chat_id: i64, kind: ListKind) -> Reply {
+    let mut lists = get_lists(state, chat_id);
+    let v = kind.items_mut(&mut lists);
+    let n = v.len();
+    v.clear();
+    if n > 0 {
+        put_lists(state, chat_id, &lists);
+    }
+    if n == 0 {
+        Reply::text(format!("Your {} list was already empty.", kind.noun()))
+    } else {
+        Reply::text(format!(
+            "Cleared {} list ({n} item{}).",
+            kind.noun(),
+            if n == 1 { "" } else { "s" }
+        ))
+    }
 }
 
 /// Human + machine friendly "now" string for the LLM to resolve relative dates.
 /// e.g. "2026-06-22 15:30 -04:00 (Sunday)". Falls back to UTC on a bad tz.
 fn now_in_tz(tz_name: &str) -> String {
     match tz_name.parse::<chrono_tz::Tz>() {
-        Ok(tz) => Utc::now().with_timezone(&tz).format("%Y-%m-%d %H:%M %:z (%A)").to_string(),
+        Ok(tz) => Utc::now()
+            .with_timezone(&tz)
+            .format("%Y-%m-%d %H:%M %:z (%A)")
+            .to_string(),
         Err(_) => Utc::now().format("%Y-%m-%d %H:%M +00:00 (%A)").to_string(),
     }
 }
@@ -412,25 +1109,49 @@ fn now_in_tz(tz_name: &str) -> String {
 
 fn active_or_recent(state: &BotState, chat_id: i64) -> Option<Workflow> {
     let wf_id = state.active.lock().unwrap().get(&chat_id).cloned();
-    wf_id
-        .and_then(|id| state.store.get(&id))
-        .or_else(|| state.store.list().into_iter().find(|w| !w.id.starts_with("cmd-")))
+    wf_id.and_then(|id| state.store.get(&id)).or_else(|| {
+        state
+            .store
+            .list()
+            .into_iter()
+            .find(|w| !w.id.starts_with("cmd-"))
+    })
 }
 
 /// Build a reply listing agents as inline buttons (one per row). Command agents
 /// (`cmd-*`) are hidden — they're driven by slash commands, not selection.
-fn agents_reply(store: &Store, header: &str) -> Reply {
-    let list: Vec<Workflow> = store.list().into_iter().filter(|w| !w.id.starts_with("cmd-")).collect();
+fn agents_reply(store: &Store, header: &str, rich: bool) -> Reply {
+    let list: Vec<Workflow> = store
+        .list()
+        .into_iter()
+        .filter(|w| !w.id.starts_with("cmd-"))
+        .collect();
     if list.is_empty() {
-        return Reply::text(format!("{header}\n\nNo agents saved yet — build one in the web UI first."));
+        let full = format!("{header}\n\nNo new agents saved yet — build one in the web UI first.");
+        return if rich {
+            let fallback = strip_tags(&full);
+            Reply::rich(full, fallback)
+        } else {
+            Reply::text(full)
+        };
     }
     let rows: Vec<Value> = list
         .iter()
-        .map(|w| json!([{ "text": format!("🤖 {}", w.name), "callback_data": format!("use:{}", w.id) }]))
+        .map(|w| json!([{ "text": w.name, "callback_data": format!("use:{}", w.id) }]))
         .collect();
-    Reply {
-        text: header.to_string(),
-        keyboard: Some(json!({ "inline_keyboard": rows })),
+    let keyboard = Some(json!({ "inline_keyboard": rows }));
+    if rich {
+        Reply {
+            text: strip_tags(header),
+            keyboard,
+            rich_html: Some(header.to_string()),
+        }
+    } else {
+        Reply {
+            text: header.to_string(),
+            keyboard,
+            rich_html: None,
+        }
     }
 }
 
@@ -475,20 +1196,33 @@ fn output_text(result: &RunResponse) -> Option<String> {
 /// Human reply from a run: the Output node's value, or the last successful node.
 fn format_result(name: &str, result: &RunResponse) -> String {
     if result.status == "error" {
-        let err = result.results.iter().find_map(|r| r.error.clone()).unwrap_or_default();
-        return format!("⚠️ *{name}* finished with an error:\n{err}");
+        let err = result
+            .results
+            .iter()
+            .find_map(|r| r.error.clone())
+            .unwrap_or_default();
+        return format!("*{name}* finished with an error:\n{err}");
     }
-    let body = output_text(result).filter(|s| !s.is_empty()).unwrap_or_else(|| "(no output)".to_string());
-    format!("🤖 *{name}*\n\n{body}")
+    let body = output_text(result)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "(no output)".to_string());
+    format!("*{name}*\n\n{body}")
 }
 
-async fn get_updates(client: &reqwest::Client, api: &str, offset: i64) -> anyhow::Result<Vec<Value>> {
+async fn get_updates(
+    client: &reqwest::Client,
+    api: &str,
+    offset: i64,
+) -> anyhow::Result<Vec<Value>> {
     let resp: Value = client
         .get(format!("{api}/getUpdates"))
         .query(&[
             ("offset", offset.to_string()),
             ("timeout", "30".to_string()),
-            ("allowed_updates", "[\"message\",\"callback_query\"]".to_string()),
+            (
+                "allowed_updates",
+                "[\"message\",\"callback_query\"]".to_string(),
+            ),
         ])
         .timeout(std::time::Duration::from_secs(40))
         .send()
@@ -498,16 +1232,79 @@ async fn get_updates(client: &reqwest::Client, api: &str, offset: i64) -> anyhow
     Ok(resp["result"].as_array().cloned().unwrap_or_default())
 }
 
+/// Register the command list with Telegram (setMyCommands) so the "/" menu and
+/// autocomplete show them with descriptions. Names must be [a-z0-9_]; the
+/// underscores (not hyphens) keep multi-word commands fully tappable.
+async fn register_commands(client: &reqwest::Client, api: &str) {
+    let commands = json!({
+        "commands": [
+            { "command": "todo",            "description": "Add a calendar-synced task" },
+            { "command": "note",            "description": "Save a quick note" },
+            { "command": "complete",        "description": "Mark something done" },
+            { "command": "notify",          "description": "Schedule a reminder" },
+            { "command": "email",           "description": "Draft and send an email" },
+            { "command": "search_notes",    "description": "Find notes" },
+            { "command": "search_tasks",    "description": "Find tasks" },
+            { "command": "list_todos",      "description": "Show the 5 newest tasks" },
+            { "command": "list_notes",      "description": "Show the 5 newest notes" },
+            { "command": "spent",           "description": "Log an expense (text or receipt photo)" },
+            { "command": "earned",          "description": "Log income received" },
+            { "command": "balance",         "description": "This week's income vs expenses" },
+            { "command": "set_income",      "description": "Set your monthly income" },
+            { "command": "buy_later",       "description": "Add an item (auto-sorts grocery vs other)" },
+            { "command": "groceries",       "description": "Show the grocery list" },
+            { "command": "clear_groceries", "description": "Clear the grocery list" },
+            { "command": "to_buy",          "description": "Show the non-grocery to-buy list" },
+            { "command": "clear_to_buy",    "description": "Clear the to-buy list" },
+            { "command": "where",           "description": "Share location to set your timezone" }
+        ]
+    });
+    match client.post(format!("{api}/setMyCommands")).json(&commands).send().await {
+        Ok(resp) if resp.status().is_success() => tracing::info!("registered bot commands"),
+        Ok(resp) => tracing::warn!("setMyCommands rejected: {}", resp.status()),
+        Err(e) => tracing::warn!("setMyCommands failed: {e}"),
+    }
+}
+
 async fn send(client: &reqwest::Client, api: &str, chat_id: i64, reply: &Reply) {
+    // Rich (HTML) reply → sendRichMessage. On any failure (older client, API
+    // rejection) fall back to a plain-text message so the user still gets content.
+    if let Some(html) = &reply.rich_html {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "rich_message": { "html": html }
+        });
+        if let Some(kb) = &reply.keyboard {
+            body["reply_markup"] = kb.clone();
+        }
+        match client.post(format!("{api}/sendRichMessage")).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => return,
+            Ok(resp) => tracing::warn!(
+                "sendRichMessage rejected ({}) — falling back to plain text",
+                resp.status()
+            ),
+            Err(e) => tracing::warn!("sendRichMessage failed ({e}) — falling back to plain text"),
+        }
+        // fall through to the plain-text path below using reply.text
+    }
+
     let mut body = json!({
         "chat_id": chat_id,
         "text": reply.text,
-        "parse_mode": "Markdown"
+        "parse_mode": "Markdown",
+        // Show clean inline hyperlinks (e.g. "Link to Notion page") instead of a
+        // big link-preview card under every message.
+        "disable_web_page_preview": true
     });
     if let Some(kb) = &reply.keyboard {
         body["reply_markup"] = kb.clone();
     }
-    if let Err(e) = client.post(format!("{api}/sendMessage")).json(&body).send().await {
+    if let Err(e) = client
+        .post(format!("{api}/sendMessage"))
+        .json(&body)
+        .send()
+        .await
+    {
         tracing::warn!("sendMessage failed: {e}");
     }
 }

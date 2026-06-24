@@ -34,7 +34,7 @@
       "id": "out",
       "type": "output",
       "position": { "x": 1160, "y": 160 },
-      "data": { "label": "Confirm", "value": "🔔 Notification set for {{dt.human}}." }
+      "data": { "label": "Confirm", "value": "Notification set for {{dt.human}}." }
     }
   ],
   "edges": [

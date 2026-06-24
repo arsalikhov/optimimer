@@ -1,0 +1,39 @@
+{
+  "name": "Search Tasks (command)",
+  "nodes": [
+    {
+      "id": "trigger_1",
+      "type": "trigger",
+      "position": { "x": 40, "y": 200 },
+      "data": { "label": "/search-tasks" }
+    },
+    {
+      "id": "q_tasks",
+      "type": "notion",
+      "position": { "x": 320, "y": 200 },
+      "data": { "label": "List Tasks", "op": "query_database", "database_id": "{{env.LIFEOS_DB_ID}}" }
+    },
+    {
+      "id": "rank",
+      "type": "llm",
+      "position": { "x": 620, "y": 200 },
+      "data": {
+        "label": "Rank tasks",
+        "model": "anthropic/claude-haiku-4.5",
+        "system": "You search the user's Tasks. You are given a search QUERY and a list of TASKS (each {id,title,url}). Output an HTML table of the most relevant tasks, at most 8, ordered by relevance, in EXACTLY this form: <table><tr><td><a href=\"URL\">TITLE</a></td></tr>...</table> — one <tr> per task. Inside TITLE and URL, escape & as &amp;, < as &lt;, > as &gt;. Match on meaning, not just exact words. If none are clearly relevant, output exactly: No matching tasks. Output ONLY the table (or that sentence) — no preamble, no code fences.",
+        "prompt": "QUERY:\n{{input.text}}\n\nTASKS:\n{{q_tasks}}"
+      }
+    },
+    {
+      "id": "out",
+      "type": "output",
+      "position": { "x": 940, "y": 200 },
+      "data": { "label": "Results", "value": "<!rich><b>Tasks matching “{{html:input.text}}”</b>\n{{rank.text}}" }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "trigger_1", "target": "q_tasks" },
+    { "id": "e2", "source": "q_tasks", "target": "rank" },
+    { "id": "e3", "source": "rank", "target": "out" }
+  ]
+}

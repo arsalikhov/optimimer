@@ -39,6 +39,18 @@ impl Ctx {
     }
 
     fn resolve(&self, expr: &str) -> String {
+        // `{{html:expr}}` resolves `expr` then HTML-escapes it, so dynamic values
+        // (e.g. a Notion title containing & or <) are safe inside rich-message HTML.
+        if let Some(inner) = expr.strip_prefix("html:") {
+            return html_escape(&self.resolve(inner.trim()));
+        }
+        // `{{num:expr}}` resolves `expr` as a number, falling back to 0 when it's
+        // missing/blank/non-numeric — so interpolating it into a JSON `number`
+        // field (e.g. an LLM that omitted an amount) can't produce invalid JSON.
+        if let Some(inner) = expr.strip_prefix("num:") {
+            let v = self.resolve(inner.trim());
+            return v.trim().parse::<f64>().map(|n| n.to_string()).unwrap_or_else(|_| "0".to_string());
+        }
         let (head, rest) = match expr.split_once('.') {
             Some((h, r)) => (h, Some(r)),
             None => (expr, None),
@@ -68,6 +80,16 @@ impl Ctx {
             other => other.to_string(),
         }
     }
+}
+
+/// Escape the five characters that are significant in HTML / Telegram rich
+/// messages, so interpolated dynamic text can't break the markup.
+pub(crate) fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Execute the workflow. Nodes run in topological order starting from the
@@ -265,6 +287,7 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
                 title_prop: field("title_prop"),
                 content: ctx.interpolate(&field("content")),
                 filter_json: ctx.interpolate(&field("filter_json")),
+                sort_json: ctx.interpolate(&field("sort_json")),
                 properties_json: ctx.interpolate(&field("properties_json")),
                 relations_json: ctx.interpolate(&field("relations_json")),
             };
@@ -279,8 +302,8 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
             let default_hour = ctx.interpolate(&field("default_hour")).parse().unwrap_or(9);
             let duration = ctx.interpolate(&field("duration_minutes")).parse().unwrap_or(60);
             match crate::datetime::resolve(&spec, &tz, default_hour, duration) {
-                Some(r) => Ok((json!({ "rfc3339": r.start, "rfc3339_end": r.end, "clear": r.clear, "far": r.far, "human": r.human }), vec![])),
-                None => Ok((json!({ "rfc3339": "", "rfc3339_end": "", "clear": "", "far": false, "human": "" }), vec![])),
+                Some(r) => Ok((json!({ "rfc3339": r.start, "rfc3339_end": r.end, "clear": r.clear, "far": r.far, "human": r.human, "human_end": r.human_end }), vec![])),
+                None => Ok((json!({ "rfc3339": "", "rfc3339_end": "", "clear": "", "far": false, "human": "", "human_end": "" }), vec![])),
             }
         }
 

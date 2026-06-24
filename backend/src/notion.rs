@@ -17,6 +17,9 @@ pub struct Op {
     pub title_prop: String,
     pub content: String,
     pub filter_json: String,
+    /// A Notion `sorts` array as JSON, applied to query_database, e.g.
+    /// `[{"timestamp":"created_time","direction":"descending"}]`. Empty = unsorted.
+    pub sort_json: String,
     /// A Notion `properties` object as JSON, merged into create/update calls
     /// (e.g. `{"Category":{"select":{"name":"Sagemesh"}}}`).
     pub properties_json: String,
@@ -24,6 +27,52 @@ pub struct Op {
     /// `{"Topics":["id1","id2"],"Areas":["id3"]}` — expanded to Notion's
     /// `{"relation":[{"id":...}]}` shape. Empty arrays are skipped.
     pub relations_json: String,
+}
+
+/// Query a database and return the RAW page objects (full `properties`), paging
+/// through every result. Unlike `query_database` (which slims output to
+/// id/title/url for cheap LLM feeding), finance balance + CSV dedup need actual
+/// property values (Amount, Direction, Category, Date, Key), so they use this.
+/// Returns an empty vec when Notion is unconfigured, so callers degrade to "no
+/// transactions" rather than erroring.
+pub async fn query_raw(
+    database_id: &str,
+    filter: Option<Value>,
+    sorts: Option<Value>,
+) -> Result<Vec<Value>> {
+    let token = std::env::var("NOTION_TOKEN").unwrap_or_default();
+    if token.is_empty() || database_id.is_empty() {
+        return Ok(vec![]);
+    }
+    let client = reqwest::Client::new();
+    let url = format!("{API}/databases/{database_id}/query");
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut body = json!({ "page_size": 100 });
+        if let Some(f) = &filter {
+            body["filter"] = f.clone();
+        }
+        if let Some(s) = &sorts {
+            body["sorts"] = s.clone();
+        }
+        if let Some(c) = &cursor {
+            body["start_cursor"] = json!(c);
+        }
+        let resp = post(&client, &token, &url, &body).await?;
+        if let Some(arr) = resp["results"].as_array() {
+            out.extend(arr.iter().cloned());
+        }
+        if resp["has_more"].as_bool().unwrap_or(false) {
+            match resp["next_cursor"].as_str() {
+                Some(c) => cursor = Some(c.to_string()),
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Execute a Notion action. Returns a slimmed-down JSON value (ids/titles/urls)
@@ -55,6 +104,11 @@ pub async fn run(o: Op) -> Result<Value> {
                 let filter: Value = serde_json::from_str(&o.filter_json)
                     .map_err(|e| anyhow!("filter_json is not valid JSON: {e}"))?;
                 body["filter"] = filter;
+            }
+            if !o.sort_json.trim().is_empty() {
+                let sorts: Value = serde_json::from_str(&o.sort_json)
+                    .map_err(|e| anyhow!("sort_json is not valid JSON: {e}"))?;
+                body["sorts"] = sorts;
             }
             let url = format!("{API}/databases/{}/query", o.database_id);
             let resp = post(&client, &token, &url, &body).await?;
@@ -292,6 +346,7 @@ fn simplify(results: &Value) -> Value {
                         "id": o.get("id"),
                         "title": extract_title(o),
                         "url": o.get("url"),
+                        "created_time": o.get("created_time"),
                         "object": o.get("object")
                     })
                 })

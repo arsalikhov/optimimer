@@ -1,6 +1,7 @@
 # Optimimer — build + deploy the backend to a Raspberry Pi (or any aarch64 box) over SSH.
 #
 #   make deploy PI=pi@192.168.1.50   # cross-build, ship binary+agents, run interactive installer
+#   make redeploy PI=pi@...          # ship binary+agents + restart — reuses existing config, no prompts
 #   make build-pi                    # just cross-compile the static aarch64 binary
 #   make logs    PI=pi@...           # follow the service logs
 #   make restart PI=pi@...           # restart the service
@@ -30,7 +31,7 @@ SCP   := scp $(SSHFLAGS)
 RSYNC := rsync -az --delete -e 'ssh $(SSHFLAGS)'
 
 .DEFAULT_GOAL := help
-.PHONY: help build-pi require-pi deploy logs restart stop uninstall
+.PHONY: help build-pi require-pi deploy redeploy logs restart stop uninstall
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -50,7 +51,8 @@ deploy: require-pi ## Ship to the Pi + run installer (add INFISICAL_ENV=dev to i
 	@SRC="$(BIN)"; [ -f "$$SRC" ] || SRC="$(PREBUILT)"; \
 	 echo "==> shipping $$SRC to $(PI):$(REMOTE_DIR)"; \
 	 $(SSH) $(PI) "sudo mkdir -p $(REMOTE_DIR) && sudo chown \$$(id -un):\$$(id -gn) $(REMOTE_DIR)"; \
-	 $(SCP) "$$SRC" $(PI):$(REMOTE_DIR)/optimimer-backend; \
+	 $(SCP) "$$SRC" $(PI):$(REMOTE_DIR)/optimimer-backend.new; \
+	 $(SSH) $(PI) "chmod +x $(REMOTE_DIR)/optimimer-backend.new && mv -f $(REMOTE_DIR)/optimimer-backend.new $(REMOTE_DIR)/optimimer-backend"; \
 	 $(RSYNC) backend/agents/ $(PI):$(REMOTE_DIR)/agents/; \
 	 $(SCP) deploy/install.sh $(PI):$(REMOTE_DIR)/install.sh; \
 	 if [ -n "$(INFISICAL_ENV)" ]; then \
@@ -62,6 +64,16 @@ deploy: require-pi ## Ship to the Pi + run installer (add INFISICAL_ENV=dev to i
 	 else \
 	   $(SSH) -t $(PI) "chmod +x $(REMOTE_DIR)/install.sh && $(REMOTE_DIR)/install.sh"; \
 	 fi
+
+redeploy: require-pi ## Ship binary+agents + restart — reuses existing config, NO installer/prompts
+	@if command -v cargo >/dev/null 2>&1; then $(MAKE) build-pi; \
+	 else echo "cargo not found locally — shipping prebuilt $(PREBUILT)"; fi
+	@SRC="$(BIN)"; [ -f "$$SRC" ] || SRC="$(PREBUILT)"; \
+	 echo "==> shipping $$SRC to $(PI):$(REMOTE_DIR) (config untouched)"; \
+	 $(SSH) $(PI) "sudo mkdir -p $(REMOTE_DIR) && sudo chown \$$(id -un):\$$(id -gn) $(REMOTE_DIR)"; \
+	 $(SCP) "$$SRC" $(PI):$(REMOTE_DIR)/optimimer-backend.new; \
+	 $(RSYNC) backend/agents/ $(PI):$(REMOTE_DIR)/agents/; \
+	 $(SSH) $(PI) "chmod +x $(REMOTE_DIR)/optimimer-backend.new && mv -f $(REMOTE_DIR)/optimimer-backend.new $(REMOTE_DIR)/optimimer-backend && sudo systemctl restart optimimer && sudo systemctl --no-pager status optimimer | head -5"
 
 logs: require-pi ## Follow the service logs on the Pi
 	$(SSH) -t $(PI) "journalctl -u optimimer -f"

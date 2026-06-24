@@ -50,13 +50,13 @@
       "id": "done_out",
       "type": "output",
       "position": { "x": 1460, "y": 120 },
-      "data": { "label": "Done", "value": "✅ Marked done: {{pick.json.title}}" }
+      "data": { "label": "Done", "value": "Marked done: {{pick.json.title}}" }
     },
     {
       "id": "miss_out",
       "type": "output",
       "position": { "x": 1180, "y": 300 },
-      "data": { "label": "Not found", "value": "🤔 Couldn't find an open item matching '{{input.text}}'." }
+      "data": { "label": "Not found", "value": "Couldn't find an open item matching '{{input.text}}'." }
     }
   ],
   "edges": [

@@ -10,8 +10,10 @@ pub struct Resolved {
     pub end: String,
     pub clear: String,
     pub far: bool,
-    /// Human-readable local time, e.g. "Tue Jun 23, 16:00".
+    /// Human-readable local start, e.g. "Tue Jun 23, 4:00 PM".
     pub human: String,
+    /// Human-readable local end clock time, e.g. "5:00 PM".
+    pub human_end: String,
 }
 
 /// Resolve an LLM-extracted "when" token object into concrete timestamps. The
@@ -59,12 +61,14 @@ pub fn resolve(spec: &Value, tz_name: &str, default_hour: u32, duration_minutes:
         tz.from_local_datetime(&ndt).earliest().or_else(|| tz.from_local_datetime(&ndt).latest())?
     };
 
+    let end = start + Duration::minutes(duration_minutes.max(0));
     Some(Resolved {
         start: start.to_rfc3339(),
-        end: (start + Duration::minutes(duration_minutes.max(0))).to_rfc3339(),
+        end: end.to_rfc3339(),
         clear: (start + Duration::hours(1)).to_rfc3339(),
         far: (start - now) > Duration::hours(12),
-        human: start.format("%a %b %d, %H:%M").to_string(),
+        human: start.format("%a %b %d, %-I:%M %p").to_string(),
+        human_end: end.format("%-I:%M %p").to_string(),
     })
 }
 

@@ -1,5 +1,7 @@
 mod datetime;
+mod db;
 mod engine;
+mod finance;
 mod models;
 mod notion;
 mod openrouter;
@@ -7,6 +9,7 @@ mod scheduler;
 mod store;
 mod telegram;
 mod transcribe;
+mod vision;
 
 use axum::{
     extract::{Path, State},
@@ -15,7 +18,9 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
+use db::Db;
 use models::{RunRequest, RunResponse, Workflow, WorkflowInput};
+use std::path::Path as FilePath;
 use store::Store;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
@@ -36,28 +41,43 @@ async fn main() {
         )
         .init();
 
-    let data_path = std::env::var("OPTIMIMER_DATA")
-        .unwrap_or_else(|_| "workflows.json".to_string())
-        .into();
+    // One SQLite database holds all persistent state (agents, timezones,
+    // schedules, shopping lists). Override the location with OPTIMIMER_DB.
+    let db_path = std::env::var("OPTIMIMER_DB").unwrap_or_else(|_| "optimimer.db".to_string());
+    let db = Db::open(FilePath::new(&db_path)).expect("open sqlite database");
+
+    let store = Store::new(db.clone());
+
+    // One-time imports from the legacy JSON stores. Each is a no-op once its
+    // table has rows, and the JSON files are left untouched as a backup.
+    store.migrate_json(FilePath::new(
+        &std::env::var("OPTIMIMER_DATA").unwrap_or_else(|_| "workflows.json".to_string()),
+    ));
+    telegram::migrate_json(
+        &db,
+        FilePath::new(&std::env::var("OPTIMIMER_TZ_DATA").unwrap_or_else(|_| "chat_tz.json".to_string())),
+        FilePath::new(&std::env::var("OPTIMIMER_LISTS_DATA").unwrap_or_else(|_| "lists.json".to_string())),
+    );
+
     let state = AppState {
-        store: Store::load(data_path),
+        store: store.clone(),
     };
 
-    // Seed the slash-command agents (cmd-notion, cmd-remind, …) from disk so the
+    // Seed the slash-command agents (cmd-todo, cmd-note, …) from disk so the
     // Telegram commands work out of the box. Existing entries are left untouched.
     seed_command_agents(&state.store);
 
     // Scheduler: backs /remind, /notify, and the auto-clear-meeting rule. The
     // worker fires due entries every 30s.
-    let sched_path = std::env::var("OPTIMIMER_SCHEDULE_DATA")
-        .unwrap_or_else(|_| "schedules.json".to_string())
-        .into();
-    let sched = scheduler::init(sched_path);
+    let sched = scheduler::init(db.clone());
+    sched.migrate_json(FilePath::new(
+        &std::env::var("OPTIMIMER_SCHEDULE_DATA").unwrap_or_else(|_| "schedules.json".to_string()),
+    ));
     tokio::spawn(scheduler::run_worker(sched));
 
     // Telegram is the primary interface — run the long-polling bot alongside
     // the HTTP API. No-ops with a warning if TELEGRAM_BOT_TOKEN is unset.
-    tokio::spawn(telegram::run_bot(state.store.clone()));
+    tokio::spawn(telegram::run_bot(store.clone(), db.clone()));
 
     let app = Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -70,9 +90,12 @@ async fn main() {
         .layer(CorsLayer::very_permissive())
         .with_state(state);
 
-    let addr = "0.0.0.0:8799";
+    // Bind to localhost only by default — the API has no auth and exposes agent
+    // CRUD, so it must not be reachable from the LAN. Override with OPTIMIMER_BIND
+    // (e.g. 0.0.0.0:8799) only behind a trusted network or a reverse proxy.
+    let addr = std::env::var("OPTIMIMER_BIND").unwrap_or_else(|_| "127.0.0.1:8799".to_string());
     tracing::info!("optimimer backend listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -90,6 +113,7 @@ fn seed_command_agents(store: &Store) {
             return;
         }
     };
+    let mut seen_commands = std::collections::HashSet::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -103,7 +127,9 @@ fn seed_command_agents(store: &Store) {
         // bundled definitions take effect on restart. Other bundled example
         // agents seed only if absent, so a user's UI edits aren't clobbered.
         let is_command = stem.starts_with("cmd-");
-        if !is_command && store.get(&stem).is_some() {
+        if is_command {
+            seen_commands.insert(stem.clone());
+        } else if store.get(&stem).is_some() {
             continue;
         }
         let input: WorkflowInput = match std::fs::read_to_string(&path)
@@ -124,6 +150,24 @@ fn seed_command_agents(store: &Store) {
             updated_at: Utc::now().to_rfc3339(),
         });
         tracing::info!("seeded agent '{stem}'");
+    }
+
+    // The files are the source of truth for `cmd-*` agents, so prune any that no
+    // longer have a backing file — otherwise a deleted command lingers in the
+    // store (and keeps responding) forever. Non-`cmd-*` agents are left alone;
+    // those may be user-created in the UI and have no file by design.
+    //
+    // Guard: if NO command files were found, the dir is probably empty/misdeployed
+    // — don't prune, or we'd wipe every command agent from the store.
+    if seen_commands.is_empty() {
+        tracing::warn!("no cmd-* agent files found in '{dir}' — skipping prune to avoid wiping commands");
+        return;
+    }
+    for wf in store.list() {
+        if wf.id.starts_with("cmd-") && !seen_commands.contains(&wf.id) {
+            store.delete(&wf.id);
+            tracing::info!("pruned orphaned command agent '{}' (no file in '{dir}')", wf.id);
+        }
     }
 }
 

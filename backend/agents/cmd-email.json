@@ -40,13 +40,13 @@
       "id": "sent_out",
       "type": "output",
       "position": { "x": 1180, "y": 120 },
-      "data": { "label": "Sent", "value": "📧 Sent to {{parse.json.to}} (HTTP {{send.status}})" }
+      "data": { "label": "Sent", "value": "Sent to {{parse.json.to}} (HTTP {{send.status}})" }
     },
     {
       "id": "mock_out",
       "type": "output",
       "position": { "x": 900, "y": 300 },
-      "data": { "label": "Mocked", "value": "📧 (mocked — set RESEND_API_KEY + EMAIL_FROM to send)\nTo: {{parse.json.to}}\nSubject: {{parse.json.subject}}\n\n{{parse.json.text}}" }
+      "data": { "label": "Mocked", "value": "(mocked — set RESEND_API_KEY + EMAIL_FROM to send)\nTo: {{parse.json.to}}\nSubject: {{parse.json.subject}}\n\n{{parse.json.text}}" }
     }
   ],
   "edges": [

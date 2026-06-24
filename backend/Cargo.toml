@@ -19,3 +19,4 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 tzf-rs = "0.4"
 dotenvy = "0.15"
+rusqlite = { version = "0.31", features = ["bundled"] }

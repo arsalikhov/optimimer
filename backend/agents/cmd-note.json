@@ -49,7 +49,7 @@
       "id": "out",
       "type": "output",
       "position": { "x": 1420, "y": 200 },
-      "data": { "label": "Confirm", "value": "📝 Saved note *{{classify.json.title}}* (Status: {{classify.json.status}})\n{{create.url}}" }
+      "data": { "label": "Confirm", "value": "Saved note *{{classify.json.title}}* (Status: {{classify.json.status}})\n{{create.url}}" }
     }
   ],
   "edges": [

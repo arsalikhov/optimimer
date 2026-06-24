@@ -1,0 +1,47 @@
+{
+  "name": "Spent (command)",
+  "nodes": [
+    {
+      "id": "trigger_1",
+      "type": "trigger",
+      "position": { "x": 40, "y": 200 },
+      "data": { "label": "/spent" }
+    },
+    {
+      "id": "parse",
+      "type": "llm",
+      "position": { "x": 320, "y": 200 },
+      "data": {
+        "label": "Parse expense",
+        "model": "anthropic/claude-sonnet-4.6",
+        "system": "You turn an expense description (typed or OCR'd from a receipt) into JSON for a Notion 'Finances' database. Output ONLY minified JSON — no prose, no code fences. Keys: amount (a POSITIVE number, digits only, no currency symbol; if unknown use 0), merchant (short payee/store name; if unknown use 'Expense'), category (EXACTLY one of: Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Cash, Other), date (YYYY-MM-DD). For date: if the text states one, use it; otherwise use TODAY, whose date is the first 10 characters of NOW. Pick the best-fitting category; use 'Other' if unsure.",
+        "prompt": "NOW: {{input.now}}\n\nEXPENSE:\n{{input.text}}"
+      }
+    },
+    {
+      "id": "create",
+      "type": "notion",
+      "position": { "x": 640, "y": 200 },
+      "data": {
+        "label": "Create transaction",
+        "op": "create_page",
+        "database_id": "{{env.FINANCES_DB_ID}}",
+        "title": "{{parse.json.merchant}}",
+        "title_prop": "Name",
+        "properties_json": "{\"Amount\":{\"number\":{{num:parse.json.amount}}},\"Direction\":{\"select\":{\"name\":\"Expense\"}},\"Category\":{\"select\":{\"name\":\"{{parse.json.category}}\"}},\"Date\":{\"date\":{\"start\":\"{{parse.json.date}}\"}},\"Source\":{\"select\":{\"name\":\"Manual\"}}}",
+        "content": "{{input.text}}"
+      }
+    },
+    {
+      "id": "out",
+      "type": "output",
+      "position": { "x": 960, "y": 200 },
+      "data": { "label": "Confirm", "value": "<!rich><b>Logged expense</b>\n<table><tr><td>Amount</td><td>${{html:parse.json.amount}}</td></tr><tr><td>Merchant</td><td>{{html:parse.json.merchant}}</td></tr><tr><td>Category</td><td>{{html:parse.json.category}}</td></tr><tr><td>Date</td><td>{{html:parse.json.date}}</td></tr></table>\n<a href=\"{{html:create.url}}\">Link to Notion page</a>" }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "trigger_1", "target": "parse" },
+    { "id": "e2", "source": "parse", "target": "create" },
+    { "id": "e3", "source": "create", "target": "out" }
+  ]
+}
