@@ -75,6 +75,14 @@ fn is_savings(desc: &str) -> bool {
     lc.contains("ws investments") || lc.contains("wealthsimple")
 }
 
+/// True if `desc` is a credit-card bill payment (e.g. Amex) from a bank account →
+/// a Transfer, NEVER an expense, so it doesn't double-count against the purchases
+/// already on that card's own statement.
+fn is_card_payment(desc: &str) -> bool {
+    let lc = desc.to_lowercase();
+    lc.contains("amex") && (lc.contains("pymt") || lc.contains("payment") || lc.contains("bill") || lc.contains("ftd"))
+}
+
 // ---- Notion property extractors ---------------------------------------------
 
 fn prop_number(props: &Value, key: &str) -> f64 {
@@ -423,6 +431,8 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
             ("Expense", "Loans".to_string())
         } else if is_savings(&r.description) {
             ("Transfer", "Savings".to_string())
+        } else if is_card_payment(&r.description) {
+            ("Transfer", "Transfer".to_string())
         } else {
             (direction, category)
         };
