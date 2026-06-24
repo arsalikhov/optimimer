@@ -15,6 +15,8 @@ A Lindy.ai-style AI agent builder. Design agents on a visual flow canvas, then r
 | 🧠 AI Step  | Calls an LLM via OpenRouter. Reference earlier nodes with `{{nodeId.text}}`. |
 | 🌐 HTTP     | Calls an external API. URL/body support `{{templating}}`.                  |
 | 🔀 Condition | Branches the flow down the `true` / `false` handle.                        |
+| 🗒️ Notion   | Query / create / update Notion pages (or save to disk when Notion is unset). |
+| ⏰ Schedule  | Fire a Telegram ping and/or a Notion update at a future time.               |
 | 📤 Output   | Final result of a run (what Telegram replies with).                        |
 
 Any string field supports `{{input}}`, `{{input.field}}`, `{{nodeId}}`, `{{nodeId.field}}` interpolation.
@@ -55,6 +57,18 @@ bun run dev:secure                                       # = infisical run --env
 
 The core keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, and (optional) `NOTION_TOKEN`.
 
+### Security — who can use the bot
+
+A Telegram bot is publicly discoverable, so the bot is **deny-by-default**: only chat ids in
+`TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) may use it; everyone else is refused. On first run leave it unset,
+message the bot once, and read the `unauthorized chat <id>` line in the logs to find your own id — then set the
+var. The HTTP API also binds to `127.0.0.1` by default (override with `OPTIMIMER_BIND`), so it isn't exposed on
+your LAN; reach the web UI over an SSH tunnel if you need it remotely. Transport to Telegram is TLS, but bot chats
+are not end-to-end encrypted (Telegram's servers see message content — inherent to the Bot API).
+
+Finance commands write to a Notion **Finances** database (`FINANCES_DB_ID`); `RENT_AMOUNTS` (default `1500,1700`)
+tunes the rent-detection rule. See `backend/.env.example` for every key the app understands.
+
 **Notion is optional.** With `NOTION_TOKEN` unset, the app skips Notion entirely and instead writes each
 "save" action to a JSON file on disk (under `OPTIMIMER_NOTION_FALLBACK_DIR`, default `notion-out/` in the
 working dir — e.g. `/opt/optimimer/notion-out/` on a Pi). So you get a working capture bot with zero Notion
@@ -86,8 +100,8 @@ bun run build
 #   cd backend  && cargo build --release   (binary -> backend/target/release/optimimer-backend)
 ```
 
-Run the release backend directly — it needs only its env vars and a writable working directory for its
-JSON state:
+Run the release backend directly — it needs only its env vars and a writable working directory for its embedded
+SQLite database (`optimimer.db`, override with `OPTIMIMER_DB`):
 
 ```sh
 cd backend && OPENROUTER_API_KEY=... TELEGRAM_BOT_TOKEN=... ./target/release/optimimer-backend
@@ -120,13 +134,20 @@ cargo install cargo-zigbuild          # also needs `zig` on PATH
 make build-pi                          # refreshes deploy/bin/optimimer-backend-aarch64
 ```
 
+After the first deploy, ship code/agent changes without re-running the installer or re-entering config:
+
+```sh
+make redeploy PI=pi@<ip>       # cross-compiles, copies binary + agents/, restarts the service
+```
+
 Other Makefile targets: `make logs PI=…` (follow logs), `make restart PI=…`, `make stop PI=…`,
 `make uninstall PI=…`. To re-run just the secret prompts later:
 `ssh -t pi@<ip> /opt/optimimer/install.sh`.
 
 **Secrets without typing them.** The installer auto-detects any of `TELEGRAM_BOT_TOKEN`,
-`OPENROUTER_API_KEY`, `NOTION_TOKEN`, `DEFAULT_TZ`, `CATEGORY_A`, `CATEGORY_B` already present in its
-environment and skips prompting for those. Two ways to feed them:
+`TELEGRAM_ALLOWED_CHAT_IDS`, `OPENROUTER_API_KEY`, `NOTION_TOKEN`, `DEFAULT_TZ`, `CATEGORY_A`, `CATEGORY_B`,
+`FINANCES_DB_ID`, `RENT_AMOUNTS` (and the other Notion database ids) already present in its environment and skips
+prompting for those. Two ways to feed them:
 
 - **From your laptop's Infisical (the Pi needs no infisical CLI):** pass `INFISICAL_ENV` and `make` exports
   the secrets locally and injects them into the remote installer:
@@ -152,11 +173,33 @@ wins.
 ## Telegram (primary interface)
 
 1. Create a bot with [@BotFather](https://t.me/BotFather), copy the token into `backend/.env`.
-2. Restart the backend. You'll see `Telegram bot started (long polling)`.
-3. In the chat:
-   - `/agents` — list your saved agents
-   - `/use <id>` — pick the active agent
-   - send any message — it becomes `{{input}}`; the agent's Output comes back as the reply
+2. Add your chat id to `TELEGRAM_ALLOWED_CHAT_IDS` (see [Security](#security--who-can-use-the-bot)) — the bot
+   refuses everyone else.
+3. Restart the backend. You'll see `Telegram bot started (long polling)`.
+
+The bot registers a native "/" menu (`setMyCommands`). Most slash commands map to bundled agents in
+`agents/cmd-*.json` (re-seeded from disk on every start, so edit the JSON to change behaviour); a few are handled
+directly in the bot. Multi-word commands use underscores (Telegram only links `[a-z0-9_]`). Built-ins:
+
+- **Agents** — `/agents` list · `/use <id>` pick the active agent, then send any message to run it as `{{input}}`.
+- **Capture** — `/todo` (calendar-synced Notion task) · `/note` · `/complete` · `/notify` (reminder) · `/email`.
+- **Search** — `/search_notes` · `/search_tasks` · `/list_todos` · `/list_notes` (5 newest).
+- **Lists** — `/buy_later` (auto-sorts grocery vs other) · `/groceries` · `/clear_groceries` · `/to_buy` ·
+  `/clear_to_buy`.
+- **Money** — `/spent` · `/earned` · `/set_income` · `/balance` (a week: `last` / `N`, or a month: `/balance june`).
+
+You can also **send a voice note** (transcribed, then routed to a command), a **receipt photo** (OCR'd into an
+expense), or a **CSV bank statement** (bulk-imported, de-duplicated, AI-categorized). Replies use Telegram's
+rich-message formatting (real tables, links) with a plain-text fallback.
+
+### Finance tracking
+
+`/spent`, `/earned` and CSV imports write to a Notion **Finances** database (`FINANCES_DB_ID`); all money math
+(`/balance`) is done in Rust, not the LLM. CSV import detects the account type (credit-card vs chequing) from the
+filename/header, classifies each row as Expense / Income / Transfer / Refund, de-duplicates by a
+date+amount+payee fingerprint, and never double-counts card payments or salary. A few recurring payees are pinned
+deterministically — rent → Housing (amounts from `RENT_AMOUNTS`), NSLSC → Loans, Wealthsimple → Savings (excluded
+from the net), Amex bill payments → Transfer, ATM withdrawals → Cash.
 
 ## API
 
