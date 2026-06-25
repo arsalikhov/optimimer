@@ -264,15 +264,25 @@ async fn period_balance(
             money(salary_logged)
         ));
     }
+    // Each spend line also shows its share of income (skipped when income is 0).
+    let pct = |amt: f64| -> String {
+        if total_income > 0.0 {
+            format!(" · {:.0}%", amt / total_income * 100.0)
+        } else {
+            String::new()
+        }
+    };
     rows.push_str(&format!(
-        "<tr><td>Expenses</td><td>{}</td></tr>",
-        money(net_expenses)
+        "<tr><td>Expenses</td><td>{}{}</td></tr>",
+        money(net_expenses),
+        pct(net_expenses)
     ));
     for (cat, amt) in &by_cat {
         rows.push_str(&format!(
-            "<tr><td>· {}</td><td>{}</td></tr>",
+            "<tr><td>· {}</td><td>{}{}</td></tr>",
             crate::engine::html_escape(cat),
-            money(*amt)
+            money(*amt),
+            pct(*amt)
         ));
     }
     if refund_total > 0.0 {
@@ -297,6 +307,9 @@ async fn period_balance(
         "<b>{}</b>\n<blockquote>{}</blockquote>\n<table>{}</table>",
         title, range, rows
     );
+    if total_income > 0.0 {
+        html.push_str("\n<i>% = share of income.</i>");
+    }
     if suppressed {
         html.push_str("\n<i>Salary deposits from imports aren't added because a monthly income is set — clear it with /set_income 0 to count actuals instead.</i>");
     }
@@ -304,9 +317,9 @@ async fn period_balance(
     // Plain fallback
     let mut fb = format!("{title} ({range})\n");
     fb.push_str(&format!("Income: {}\n", money(total_income)));
-    fb.push_str(&format!("Expenses: {}\n", money(net_expenses)));
+    fb.push_str(&format!("Expenses: {}{}\n", money(net_expenses), pct(net_expenses)));
     for (cat, amt) in &by_cat {
-        fb.push_str(&format!("  {cat}: {}\n", money(*amt)));
+        fb.push_str(&format!("  {cat}: {}{}\n", money(*amt), pct(*amt)));
     }
     fb.push_str(&format!("Net: {}", money(net)));
     if savings_total > 0.0 {
