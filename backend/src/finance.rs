@@ -43,14 +43,12 @@ fn db_id() -> String {
 
 /// Exact e-transfer amounts that mean "rent" → forced to a Housing expense (rent
 /// is paid by Interac e-transfer, so it otherwise looks like a generic transfer).
-/// Configurable via RENT_AMOUNTS (comma-separated); defaults cover the current
-/// 1500 and the post-July 1700 so historical and future statements both match.
+/// Opt-in via RENT_AMOUNTS (comma-separated exact amounts); empty = disabled.
 fn rent_amounts() -> Vec<f64> {
     std::env::var("RENT_AMOUNTS")
         .ok()
         .map(|s| s.split(',').filter_map(|x| x.trim().parse::<f64>().ok()).collect::<Vec<_>>())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec![1500.0, 1700.0])
+        .unwrap_or_default()
 }
 
 /// True if `desc` looks like an Interac e-transfer and `amount` matches a rent amount.

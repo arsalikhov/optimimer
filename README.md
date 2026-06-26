@@ -66,8 +66,8 @@ var. The HTTP API also binds to `127.0.0.1` by default (override with `OPTIMIMER
 your LAN; reach the web UI over an SSH tunnel if you need it remotely. Transport to Telegram is TLS, but bot chats
 are not end-to-end encrypted (Telegram's servers see message content — inherent to the Bot API).
 
-Finance commands write to a Notion **Finances** database (`FINANCES_DB_ID`); `RENT_AMOUNTS` (default `1500,1700`)
-tunes the rent-detection rule. See `backend/.env.example` for every key the app understands.
+Finance commands write to a Notion **Finances** database (`FINANCES_DB_ID`); `RENT_AMOUNTS` (comma-separated exact
+amounts, off by default) enables the rent-detection rule. See `backend/.env.example` for every key the app understands.
 
 **Notion is optional.** With `NOTION_TOKEN` unset, the app skips Notion entirely and instead writes each
 "save" action to a JSON file on disk (under `OPTIMIMER_NOTION_FALLBACK_DIR`, default `notion-out/` in the
@@ -183,6 +183,11 @@ Sam at 4pm", "spent 20 on lunch", "what's my balance", "add milk to my list" —
 below are still wired up and run the exact same agents; natural language is just a front door to them. (An agent you
 pick with `/use` takes over plain text, so the router stays out of the way while you're driving a custom agent.)
 
+**Experimental agent mode.** Set `AGENT_MODE=1` to route plain messages through a tool-calling loop instead: one model
+(`AGENT_MODEL`, default Sonnet) is given the bot's capabilities as function tools and decides which to call — chaining
+several in one message ("log my $20 lunch and add milk to groceries"). Off by default; otherwise plain messages use the
+cheaper single-command router above.
+
 The bot also registers a native "/" menu (`setMyCommands`). Most slash commands map to bundled agents in
 `agents/cmd-*.json` (re-seeded from disk on every start, so edit the JSON to change behaviour); a few are handled
 directly in the bot. Multi-word commands use underscores (Telegram only links `[a-z0-9_]`). Built-ins:
@@ -190,9 +195,10 @@ directly in the bot. Multi-word commands use underscores (Telegram only links `[
 - **Agents** — `/agents` list · `/use <id>` pick the active agent, then send any message to run it as `{{input}}`.
 - **Capture** — `/todo` (calendar-synced Notion task) · `/note` · `/complete` · `/notify` (reminder) · `/email`.
 - **Search** — `/search_notes` · `/search_tasks` · `/list_todos` · `/list_notes` (5 newest).
-- **Lists** — `/buy_later` (auto-sorts grocery vs other) · `/groceries` · `/clear_groceries` · `/to_buy` ·
-  `/clear_to_buy`.
+- **Lists** — `/buy_later` (auto-sorts grocery vs other) · `/groceries` (text) · `/grocery_shopping` (interactive
+  tap-to-check list) · `/clear_groceries` · `/to_buy` · `/clear_to_buy`.
 - **Money** — `/spent` · `/earned` · `/set_income` · `/balance` (a week: `last` / `N`, or a month: `/balance june`).
+- **Timezone** — `/tz <Area/City>` (or share a location pin) so reminders fire at the right local time.
 
 You can also **send a voice note** (transcribed, then routed to a command), a **receipt photo** (OCR'd into an
 expense), or a **CSV bank statement** (bulk-imported, de-duplicated, AI-categorized). Replies use Telegram's
@@ -203,9 +209,12 @@ rich-message formatting (real tables, links) with a plain-text fallback.
 `/spent`, `/earned` and CSV imports write to a Notion **Finances** database (`FINANCES_DB_ID`); all money math
 (`/balance`) is done in Rust, not the LLM. CSV import detects the account type (credit-card vs chequing) from the
 filename/header, classifies each row as Expense / Income / Transfer / Refund, de-duplicates by a
-date+amount+payee fingerprint, and never double-counts card payments or salary. A few recurring payees are pinned
-deterministically — rent → Housing (amounts from `RENT_AMOUNTS`), NSLSC → Loans, Wealthsimple → Savings (excluded
-from the net), Amex bill payments → Transfer, ATM withdrawals → Cash.
+date+amount+payee fingerprint, and never double-counts card payments or salary. Manual `/spent` / `/earned` entries
+are deduped the same way, and a same-amount near-match within a few days is flagged in the transaction's Notion **Note**
+for you to review. Repeat CSV parses and receipt OCRs are cached, so re-importing the same file doesn't re-call the
+model. A few recurring payees are pinned deterministically — rent → Housing (exact amounts from `RENT_AMOUNTS`, off by
+default), NSLSC → Loans, Wealthsimple → Savings (excluded from the net), Amex bill payments → Transfer, ATM
+withdrawals → Cash.
 
 ## API
 

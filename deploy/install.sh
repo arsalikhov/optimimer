@@ -131,7 +131,7 @@ PROJECTS_DB_ID=${PROJECTS_DB_ID:-}
 # Finances DB (/spent, /earned, /balance, CSV import). Blank = transactions saved to disk.
 FINANCES_DB_ID=${FINANCES_DB_ID:-}
 # Exact e-transfer amounts treated as rent → Housing expense (comma-separated).
-# Defaults to 1500,1700 if unset.
+# Optional; rent detection is off unless you set this.
 RENT_AMOUNTS=${RENT_AMOUNTS:-}
 RESEND_API_KEY=${RESEND_API_KEY:-}
 EMAIL_FROM=${EMAIL_FROM:-}

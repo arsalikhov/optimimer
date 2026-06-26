@@ -21,3 +21,11 @@ backend/workflows.json
 backend/schedules.json
 backend/chat_tz.json
 backend/notion-out/
+
+# local Infisical project config (workspace id) — not for the repo
+.infisical.json
+
+# runtime SQLite database (transactions, lists, schedules — personal data)
+*.db
+*.db-shm
+*.db-wal
