@@ -336,9 +336,11 @@ async fn period_balance(
     // emoji, which reads more clearly than a small bullet.
     let sub = |name: &str| format!("\u{00A0}\u{00A0}{} {}", row_emoji(name), esc(name));
     // The renderer draws no border between body rows, so divide the sections
-    // with a near-full-width rule row. Kept just under the table width so the
-    // line doesn't wrap a stray dash onto the next line.
-    let sep = format!("<tr><td colspan=\"3\">{}</td></tr>", "─".repeat(48));
+    // with a rule row. A colspan cell's text sets the table's MINIMUM width, so
+    // this length is deliberately short enough to fit a phone screen — a longer
+    // line (to reach a desktop bubble's edge) pushes the table wider than mobile
+    // and scrolls the labels off-screen. Mobile fit wins.
+    let sep = format!("<tr><td colspan=\"3\">{}</td></tr>", "─".repeat(24));
 
     let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
