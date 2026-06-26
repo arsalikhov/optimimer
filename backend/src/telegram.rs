@@ -21,8 +21,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Other commands:
 ///   /start | /agents   list agents as tappable buttons
 ///   /use <id|name>     set the active agent for this chat
-///   /where             share your location so reminders use your current timezone
-///   /tz <Area/City>    set your timezone manually (e.g. /tz Europe/London)
+///   /tz <Area/City>    set your timezone (e.g. /tz Europe/London); a shared location pin also works
 ///
 /// No-op (with a log line) when TELEGRAM_BOT_TOKEN is unset.
 
@@ -347,25 +346,10 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         };
     }
 
-    if text.starts_with("/where") {
-        return Reply {
-            text: format!(
-                "Tap below to share your location — I'll set your timezone so reminders fire at the right time.\nCurrent timezone: *{}*",
-                tz_for(state, chat_id)
-            ),
-            keyboard: Some(json!({
-                "keyboard": [[{ "text": "Share location", "request_location": true }]],
-                "resize_keyboard": true,
-                "one_time_keyboard": true
-            })),
-            rich_html: None,
-        };
-    }
-
     if let Some(arg) = text.strip_prefix("/tz") {
         let name = arg.trim();
         if name.is_empty() {
-            return Reply::text(format!("Your timezone is *{}*.\nSet it with `/tz Europe/London`, or send your location with /where.", tz_for(state, chat_id)));
+            return Reply::text(format!("Your timezone is *{}*.\nSet it with `/tz Europe/London`, or share a location pin and I'll set it from that.", tz_for(state, chat_id)));
         }
         return match name.parse::<chrono_tz::Tz>() {
             Ok(_) => {
@@ -1665,7 +1649,7 @@ async fn register_commands(client: &reqwest::Client, api: &str) {
             { "command": "clear_groceries", "description": "Clear the grocery list" },
             { "command": "to_buy",          "description": "Show the non-grocery to-buy list" },
             { "command": "clear_to_buy",    "description": "Clear the to-buy list" },
-            { "command": "where",           "description": "Share location to set your timezone" }
+            { "command": "tz",              "description": "Set your timezone (e.g. /tz Europe/London)" }
         ]
     });
     match client.post(format!("{api}/setMyCommands")).json(&commands).send().await {
@@ -1708,9 +1692,9 @@ async fn send(client: &reqwest::Client, api: &str, chat_id: i64, reply: &Reply) 
     if let Some(kb) = &reply.keyboard {
         body["reply_markup"] = kb.clone();
     } else {
-        // Dismiss any lingering custom reply keyboard (notably the /where "Share
-        // location" button) so it doesn't sit stuck in the input bar. Harmless
-        // no-op when none is showing; doesn't touch inline keyboards.
+        // Dismiss any lingering custom reply keyboard (e.g. an old "Share
+        // location" button from before /where was removed) so it can't sit stuck
+        // in the input bar. Harmless no-op otherwise; doesn't touch inline keyboards.
         body["reply_markup"] = json!({ "remove_keyboard": true });
     }
     if let Err(e) = client
