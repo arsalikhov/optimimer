@@ -302,6 +302,9 @@ async fn period_balance(
     let row = |label: &str, amount: &str, percent: &str| -> String {
         format!("<tr><td>{label}</td><td>{amount}</td><td>{percent}</td></tr>")
     };
+    // The renderer draws no border between body rows, so separate the three
+    // sections with an explicit full-width rule row.
+    let sep = "<tr><td colspan=\"3\">────────────────────────────</td></tr>";
 
     let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
@@ -314,6 +317,7 @@ async fn period_balance(
     if suppressed {
         rows.push_str(&row("· salary deposits (not counted)", &money(salary_logged), ""));
     }
+    rows.push_str(sep);
     rows.push_str(&row("<b>Expenses</b>", &money(net_expenses), &pct(net_expenses)));
     for (cat, amt) in &by_cat {
         rows.push_str(&row(&format!("· {}", esc(cat)), &money(*amt), &pct(*amt)));
@@ -321,6 +325,7 @@ async fn period_balance(
     if refund_total > 0.0 {
         rows.push_str(&row("· refunds", &format!("-{}", money(refund_total)), ""));
     }
+    rows.push_str(sep);
     rows.push_str(&row(&format!("<b>Net {net_dot}</b>"), &format!("<b>{}</b>", money(net)), ""));
 
     let mut html = format!(
