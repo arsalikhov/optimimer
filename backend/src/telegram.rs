@@ -1245,7 +1245,7 @@ async fn handle_balance(state: &BotState, chat_id: i64, body: &str) -> Reply {
         crate::finance::weekly_balance(&tz, income, parse_weeks_ago(body)).await
     };
     match result {
-        Ok(md) => Reply::text(md),
+        Ok((html, fallback)) => Reply::rich(html, fallback),
         Err(e) => Reply::text(format!("Couldn't compute the balance: {e}")),
     }
 }

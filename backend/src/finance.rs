@@ -173,7 +173,7 @@ pub async fn weekly_balance(
     tz_name: &str,
     monthly_income: f64,
     weeks_ago: i64,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let tz: chrono_tz::Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
     let today = Utc::now().with_timezone(&tz).date_naive();
     let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
@@ -206,7 +206,7 @@ pub async fn monthly_balance(
     monthly_income: f64,
     month: u32,
     year: i32,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let start = chrono::NaiveDate::from_ymd_opt(year, month, 1)
         .ok_or_else(|| anyhow!("invalid month {month}/{year}"))?;
     let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
@@ -231,7 +231,7 @@ async fn period_balance(
     salary_budget: f64,
     monthly_income: f64,
     budget_label: &str,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let pages = crate::notion::query_raw(&db_id(), Some(filter), None).await?;
 
     let mut salary_logged = 0.0;
@@ -290,108 +290,63 @@ async fn period_balance(
     let net_dot = if net >= 0.0 { "🟢" } else { "🔴" };
     let suppressed = use_slice && salary_logged > 0.0;
 
-    // Build three sections — Income, Expenses, Net — as monospace table rows
-    // (label, amount, percent, suffix). The suffix sits OUTSIDE the right border
-    // (used for the net 🟢/🔴 so a wide emoji can't break column alignment).
-    let pctval = |amt: f64| -> String {
+    // Native rich table. The renderer draws a proper bordered grid (column +
+    // row lines) when the table has a header row — without one it falls back to
+    // a borderless layout. Section totals (Income/Expenses/Net) are bold with
+    // indented "· " sub-rows; the net 🟢/🔴 lives in its cell (native cells
+    // handle emoji fine — no monospace alignment to break).
+    let pct = |amt: f64| -> String {
         if total_income > 0.0 { format!("{:.0}%", amt / total_income * 100.0) } else { String::new() }
     };
-    let blank = String::new();
+    let esc = crate::engine::html_escape;
+    let row = |label: &str, amount: &str, percent: &str| -> String {
+        format!("<tr><td>{label}</td><td>{amount}</td><td>{percent}</td></tr>")
+    };
 
-    let mut income_rows = vec![("Income".to_string(), money(total_income), blank.clone(), blank.clone())];
+    let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
         let label = if use_slice { budget_label.trim_start_matches("· ") } else { "salary (logged)" };
-        income_rows.push((format!("  {label}"), money(salary_component), blank.clone(), blank.clone()));
+        rows.push_str(&row(&format!("· {}", esc(label)), &money(salary_component), ""));
     }
     if other_income > 0.0 {
-        income_rows.push(("  other income".to_string(), money(other_income), blank.clone(), blank.clone()));
+        rows.push_str(&row("· other income", &money(other_income), ""));
     }
     if suppressed {
-        income_rows.push(("  salary deposits (not counted)".to_string(), money(salary_logged), blank.clone(), blank.clone()));
+        rows.push_str(&row("· salary deposits (not counted)", &money(salary_logged), ""));
     }
-
-    let mut expense_rows = vec![("Expenses".to_string(), money(net_expenses), pctval(net_expenses), blank.clone())];
+    rows.push_str(&row("<b>Expenses</b>", &money(net_expenses), &pct(net_expenses)));
     for (cat, amt) in &by_cat {
-        expense_rows.push((format!("  {cat}"), money(*amt), pctval(*amt), blank.clone()));
+        rows.push_str(&row(&format!("· {}", esc(cat)), &money(*amt), &pct(*amt)));
     }
     if refund_total > 0.0 {
-        expense_rows.push(("  refunds".to_string(), format!("-{}", money(refund_total)), blank.clone(), blank.clone()));
+        rows.push_str(&row("· refunds", &format!("-{}", money(refund_total)), ""));
     }
+    rows.push_str(&row(&format!("<b>Net {net_dot}</b>"), &format!("<b>{}</b>", money(net)), ""));
 
-    let net_rows = vec![("Net".to_string(), money(net), blank.clone(), net_dot.to_string())];
-
-    let table = boxed_table(&[income_rows, expense_rows, net_rows]);
-
-    // Markdown message: bold title, the table in a monospace code block (so the
-    // box-drawing lines/columns align in any client), then small italic notes.
-    let mut out = format!("*{title}*  _{range}_\n```\n{table}\n```");
-    let mut notes: Vec<String> = Vec::new();
+    let mut html = format!(
+        "<b>{title}</b>  <i>{range}</i>\n<table><thead><tr><th>Item</th><th>Amount</th><th>%</th></tr></thead><tbody>{rows}</tbody></table>"
+    );
     if total_income > 0.0 {
-        notes.push("_% = share of income._".to_string());
+        html.push_str("\n<i>% = share of income.</i>");
     }
     if savings_total > 0.0 {
-        notes.push(format!("_💰 Saved {} to savings (not counted in net)._", money(savings_total)));
+        html.push_str(&format!("\n<i>💰 Saved {} to savings (not counted in net).</i>", money(savings_total)));
     }
     if suppressed {
-        notes.push("_Salary deposits from imports aren't added because a monthly income is set — clear with /set\\_income 0 to count actuals._".to_string());
+        html.push_str("\n<i>Salary deposits from imports aren't added because a monthly income is set — clear with /set_income 0 to count actuals.</i>");
     }
-    if !notes.is_empty() {
-        out.push('\n');
-        out.push_str(&notes.join("\n"));
-    }
-    Ok(out)
-}
 
-/// Render sections of `(label, amount, percent, suffix)` rows as a monospace
-/// box-drawing table: light dividers between sections, a heavy rule at the
-/// bottom (the "thicker line" before the notes). The percent column is dropped
-/// entirely when no row uses it. `suffix` prints after the right border so a
-/// wide emoji can't shift the columns.
-fn boxed_table(sections: &[Vec<(String, String, String, String)>]) -> String {
-    let rows: Vec<&(String, String, String, String)> = sections.iter().flatten().collect();
-    if rows.is_empty() {
-        return String::new();
+    // Plain-text fallback (older clients / rich-send failure).
+    let mut fb = format!("{title} ({range})\nIncome: {}\nExpenses: {}\n", money(total_income), money(net_expenses));
+    for (cat, amt) in &by_cat {
+        fb.push_str(&format!("  {cat}: {}\n", money(*amt)));
     }
-    let has_pct = rows.iter().any(|r| !r.2.is_empty());
-    let wl = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
-    let wa = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0);
-    let wp = rows.iter().map(|r| r.2.chars().count()).max().unwrap_or(0);
-
-    let rule = |left: &str, mid: &str, right: &str, dash: &str| -> String {
-        let mut s = format!("{left}{}", dash.repeat(wl + 2));
-        s.push_str(&format!("{mid}{}", dash.repeat(wa + 2)));
-        if has_pct {
-            s.push_str(&format!("{mid}{}", dash.repeat(wp + 2)));
-        }
-        s.push_str(right);
-        s
-    };
-    let render = |r: &(String, String, String, String)| -> String {
-        let mut line = format!("│ {:<wl$} │ {:>wa$}", r.0, r.1, wl = wl, wa = wa);
-        if has_pct {
-            line.push_str(&format!(" │ {:>wp$}", r.2, wp = wp));
-        }
-        line.push_str(" │");
-        if !r.3.is_empty() {
-            line.push_str(&format!(" {}", r.3));
-        }
-        line
-    };
-
-    let mut out = rule("┌", "┬", "┐", "─");
-    for (i, sec) in sections.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-            out.push_str(&rule("├", "┼", "┤", "─"));
-        }
-        for r in sec {
-            out.push('\n');
-            out.push_str(&render(r));
-        }
+    fb.push_str(&format!("Net: {}", money(net)));
+    if savings_total > 0.0 {
+        fb.push_str(&format!("\nSaved: {}", money(savings_total)));
     }
-    out.push('\n');
-    out.push_str(&rule("┗", "┻", "┛", "━"));
-    out
+
+    Ok((html, fb))
 }
 
 // ---- CSV import (dedup-aware) ------------------------------------------------
@@ -751,32 +706,3 @@ fn strip_fences(s: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::boxed_table;
-
-    #[test]
-    fn table_has_aligned_columns_and_a_heavy_bottom() {
-        let income = vec![("Income".to_string(), "$2670.34".to_string(), String::new(), String::new())];
-        let expenses = vec![
-            ("Expenses".to_string(), "$227.28".to_string(), "9%".to_string(), String::new()),
-            ("  Cash".to_string(), "$200.00".to_string(), "7%".to_string(), String::new()),
-        ];
-        let net = vec![("Net".to_string(), "$2443.06".to_string(), String::new(), "🟢".to_string())];
-        let t = boxed_table(&[income, expenses, net]);
-        let lines: Vec<&str> = t.lines().collect();
-
-        // Every grid line (those starting with a box corner/edge) is the same width.
-        let widths: Vec<usize> = lines
-            .iter()
-            .filter(|l| l.starts_with(['┌', '├', '│', '┗']))
-            .map(|l| l.trim_end_matches(" 🟢").chars().count())
-            .collect();
-        assert!(widths.windows(2).all(|w| w[0] == w[1]), "ragged columns: {widths:?}");
-
-        assert!(t.starts_with('┌'));
-        assert!(t.lines().last().unwrap().starts_with('┗'), "heavy bottom rule expected");
-        assert_eq!(t.matches('├').count(), 2, "two section dividers (income|expenses|net)");
-        assert!(t.contains("🟢"), "net suffix kept");
-    }
-}
