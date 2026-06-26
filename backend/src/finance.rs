@@ -339,7 +339,7 @@ async fn period_balance(
     // it exceeds the content width the slack inflates the last column (% gets
     // pushed off-screen on mobile). Keep it SHORTER than the content so columns
     // size to their data and nothing is forced wider.
-    let sep = format!("<tr><td colspan=\"3\">{}</td></tr>", "─".repeat(16));
+    let sep = format!("<tr><td colspan=\"3\" align=\"center\">{}</td></tr>", "─".repeat(16));
 
     let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
