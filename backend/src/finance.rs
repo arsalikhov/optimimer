@@ -302,30 +302,33 @@ async fn period_balance(
     let row = |label: &str, amount: &str, percent: &str| -> String {
         format!("<tr><td>{label}</td><td>{amount}</td><td>{percent}</td></tr>")
     };
-    // The renderer draws no border between body rows, so separate the three
-    // sections with an explicit full-width rule row.
-    let sep = "<tr><td colspan=\"3\">────────────────────────────</td></tr>";
+    // Indent sub-rows under their category with non-breaking spaces (plain
+    // leading spaces collapse in the renderer) so the hierarchy is obvious.
+    let sub = |name: &str| format!("\u{00A0}\u{00A0}\u{00A0}· {}", esc(name));
+    // The renderer draws no border between body rows, so divide the sections
+    // with a full-width rule row — long enough to reach the right edge.
+    let sep = format!("<tr><td colspan=\"3\">{}</td></tr>", "─".repeat(52));
 
     let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
         let label = if use_slice { budget_label.trim_start_matches("· ") } else { "salary (logged)" };
-        rows.push_str(&row(&format!("· {}", esc(label)), &money(salary_component), ""));
+        rows.push_str(&row(&sub(label), &money(salary_component), ""));
     }
     if other_income > 0.0 {
-        rows.push_str(&row("· other income", &money(other_income), ""));
+        rows.push_str(&row(&sub("other income"), &money(other_income), ""));
     }
     if suppressed {
-        rows.push_str(&row("· salary deposits (not counted)", &money(salary_logged), ""));
+        rows.push_str(&row(&sub("salary deposits (not counted)"), &money(salary_logged), ""));
     }
-    rows.push_str(sep);
+    rows.push_str(&sep);
     rows.push_str(&row("<b>Expenses</b>", &money(net_expenses), &pct(net_expenses)));
     for (cat, amt) in &by_cat {
-        rows.push_str(&row(&format!("· {}", esc(cat)), &money(*amt), &pct(*amt)));
+        rows.push_str(&row(&sub(cat), &money(*amt), &pct(*amt)));
     }
     if refund_total > 0.0 {
-        rows.push_str(&row("· refunds", &format!("-{}", money(refund_total)), ""));
+        rows.push_str(&row(&sub("refunds"), &format!("-{}", money(refund_total)), ""));
     }
-    rows.push_str(sep);
+    rows.push_str(&sep);
     rows.push_str(&row(&format!("<b>Net {net_dot}</b>"), &format!("<b>{}</b>", money(net)), ""));
 
     let mut html = format!(
