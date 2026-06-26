@@ -17,6 +17,20 @@ pub async fn read_receipt(image: Vec<u8>, mime: &str) -> Result<String> {
     }
     let model = std::env::var("OCR_MODEL").unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
     let mime = if mime.is_empty() { "image/jpeg" } else { mime };
+
+    // Cache by a hash of the exact image bytes (+ model): re-sending the same
+    // photo returns the prior OCR sentence instead of re-running the vision call.
+    let img_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        image.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
+    let ck = crate::cache::key("ocr", &[model.as_str(), &img_hash]);
+    if let Some(cached) = crate::cache::get(&ck) {
+        return Ok(cached);
+    }
+
     let data_url = format!("data:{};base64,{}", mime, STANDARD.encode(&image));
 
     let body = json!({
@@ -43,8 +57,10 @@ pub async fn read_receipt(image: Vec<u8>, mime: &str) -> Result<String> {
     if !status.is_success() {
         return Err(anyhow!("receipt OCR {}: {}", status, j));
     }
-    j["choices"][0]["message"]["content"]
+    let out = j["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.trim().to_string())
-        .ok_or_else(|| anyhow!("unexpected OCR response: {}", j))
+        .ok_or_else(|| anyhow!("unexpected OCR response: {}", j))?;
+    crate::cache::put(&ck, &out);
+    Ok(out)
 }

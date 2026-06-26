@@ -1,3 +1,4 @@
+mod cache;
 mod datetime;
 mod db;
 mod engine;
@@ -45,6 +46,9 @@ async fn main() {
     // schedules, shopping lists). Override the location with OPTIMIMER_DB.
     let db_path = std::env::var("OPTIMIMER_DB").unwrap_or_else(|_| "optimimer.db".to_string());
     let db = Db::open(FilePath::new(&db_path)).expect("open sqlite database");
+
+    // Cache for expensive deterministic LLM calls (CSV parse, receipt OCR).
+    cache::init(db.clone());
 
     let store = Store::new(db.clone());
 

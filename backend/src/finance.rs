@@ -673,6 +673,17 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
     // Cap the payload so a huge statement can't blow the context window.
     let csv = if csv.len() > 16000 { &csv[..16000] } else { csv };
 
+    // Cache the parse: re-importing the same statement (same model/account/text)
+    // reuses the prior result instead of paying for the LLM again. `today` is
+    // deliberately NOT in the key — it only fills missing dates, and keying on it
+    // would defeat the cache across days.
+    let ck = crate::cache::key("csv", &[&model, account_hint, csv]);
+    if let Some(cached) = crate::cache::get(&ck) {
+        if let Ok(rows) = serde_json::from_str::<Vec<Row>>(&cached) {
+            return Ok(rows);
+        }
+    }
+
     let account_line = match account_hint.trim().to_lowercase().as_str() {
         "credit" => "This is a CREDIT-CARD statement.",
         "chequing" => "This is a CHEQUING / bank-account statement.",
@@ -710,6 +721,7 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
     let cleaned = strip_fences(content);
     let rows: Vec<Row> = serde_json::from_str(&cleaned)
         .map_err(|e| anyhow!("model did not return a JSON array of transactions: {e}"))?;
+    crate::cache::put(&ck, &cleaned);
     Ok(rows)
 }
 

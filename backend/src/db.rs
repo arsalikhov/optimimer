@@ -80,6 +80,11 @@ fn init_schema(conn: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS chat_finance (
              chat_id        INTEGER PRIMARY KEY,
              monthly_income REAL NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS llm_cache (
+             key     TEXT PRIMARY KEY,
+             value   TEXT NOT NULL,
+             created TEXT NOT NULL DEFAULT ''
          );",
     )?;
     Ok(())
