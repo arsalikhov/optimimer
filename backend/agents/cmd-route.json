@@ -1,11 +1,11 @@
 {
-  "name": "Route (voice)",
+  "name": "Route (natural language)",
   "nodes": [
     {
       "id": "trigger_1",
       "type": "trigger",
       "position": { "x": 40, "y": 160 },
-      "data": { "label": "Transcript" }
+      "data": { "label": "Message" }
     },
     {
       "id": "router",
@@ -14,8 +14,8 @@
       "data": {
         "label": "Route to command",
         "model": "anthropic/claude-haiku-4.5",
-        "system": "You route a transcribed voice message to ONE command. Output ONLY minified JSON {\"command\":..., \"text\":...} — no prose, no code fences. command is exactly one of:\n- todo: a task, reminder, meeting, appointment, or workout — anything to be reminded about or logged ('remind me to...', 'at 4pm...', 'consult tomorrow at 2pm')\n- complete: marking something done/bought/finished ('I finished...', 'bought the groceries')\n- notify: send yourself a Telegram notification/ping\n- email: send an email to someone\n- note: save a note, idea, thought, or piece of information\nPick the single best fit; if it's an unclear capture or a stray thought, use \"note\". text is the cleaned-up instruction to pass to that command — a clear imperative with filler words removed, preserving all the meaningful detail (people, times, amounts).",
-        "prompt": "{{input.text}}"
+        "system": "You route ONE natural-language message (typed or transcribed) to the single command that best fulfils it. Output ONLY minified JSON {\"command\":..., \"text\":...} — no prose, no code fences.\n\ncommand is EXACTLY one of:\n- todo: a task, reminder, meeting, appointment, or workout to log or be reminded about ('remind me to call Sam at 4pm', 'dentist tomorrow 2pm', 'workout at 6')\n- complete: marking something done / bought / finished ('finished the report', 'got the groceries')\n- note: save a note, idea, thought, or piece of information to remember ('idea: ...', 'note that ...')\n- notify: send yourself a Telegram ping/notification at a time ('ping me in an hour')\n- email: send an email to someone ('email Alex that ...')\n- spent: money you spent / an expense ('spent 20 on lunch', 'paid 50 for gas', '$14 coffee')\n- earned: money you received / income ('got paid 3000', 'received 200 from a client')\n- set_income: set or update your monthly income ('set my income to 5000', 'my monthly income is 4000')\n- balance: asking about money — spending, income, or where you stand ('what's my balance', 'how much did I spend', 'balance for may', 'balance last week')\n- search_notes: find/search saved notes ('find my note about taxes', 'search notes for vpn')\n- search_tasks: find/search tasks ('find my task about the demo', 'search tasks for invoice')\n- list_todos: show recent tasks ('show my tasks', 'what are my todos', 'list my tasks')\n- list_notes: show recent notes ('show my notes', 'list notes')\n- buy_later: add a shopping item to buy later ('add milk to my list', 'I need to buy batteries', 'buy later: paper towels') — auto-sorted into groceries vs other\n- groceries: show the grocery list\n- to_buy: show the non-grocery shopping list\n- clear_groceries: clear the grocery list\n- clear_to_buy: clear the non-grocery list\n- none: anything that doesn't clearly map to a command — a question, chit-chat, or something too vague to act on\n\nDisambiguation: money already spent → spent (NOT todo); a future thing to do or be reminded of → todo; pure information to keep → note. 'how much / what's my balance' → balance, never spent.\n\ntext is the cleaned-up argument to pass to that command: a clear imperative with filler removed, preserving every meaningful detail (people, times, amounts, merchants). For query commands (balance, search_notes, search_tasks, list_todos, list_notes, groceries, to_buy, clear_*) put ONLY the relevant argument (e.g. the month for balance, the search terms for a search) or an empty string if there is none.",
+        "prompt": "NOW: {{input.now}}\n\nMESSAGE:\n{{input.text}}"
       }
     },
     {

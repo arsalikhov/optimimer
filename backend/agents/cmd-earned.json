@@ -1,5 +1,5 @@
 {
-  "name": "Earned (command)",
+  "name": "Earned (parser)",
   "nodes": [
     {
       "id": "trigger_1",
@@ -19,29 +19,14 @@
       }
     },
     {
-      "id": "create",
-      "type": "notion",
-      "position": { "x": 640, "y": 200 },
-      "data": {
-        "label": "Create transaction",
-        "op": "create_page",
-        "database_id": "{{env.FINANCES_DB_ID}}",
-        "title": "{{parse.json.source}}",
-        "title_prop": "Name",
-        "properties_json": "{\"Amount\":{\"number\":{{num:parse.json.amount}}},\"Direction\":{\"select\":{\"name\":\"Income\"}},\"Category\":{\"select\":{\"name\":\"{{parse.json.category}}\"}},\"Date\":{\"date\":{\"start\":\"{{parse.json.date}}\"}},\"Source\":{\"select\":{\"name\":\"Manual\"}}}",
-        "content": "{{input.text}}"
-      }
-    },
-    {
       "id": "out",
       "type": "output",
-      "position": { "x": 960, "y": 200 },
-      "data": { "label": "Confirm", "value": "<!rich><b>Logged income</b>\n<table><tr><td>Amount</td><td>${{html:parse.json.amount}}</td></tr><tr><td>Source</td><td>{{html:parse.json.source}}</td></tr><tr><td>Date</td><td>{{html:parse.json.date}}</td></tr></table>\n<a href=\"{{html:create.url}}\">Link to Notion page</a>" }
+      "position": { "x": 640, "y": 200 },
+      "data": { "label": "Parsed JSON", "value": "{{parse.json}}" }
     }
   ],
   "edges": [
     { "id": "e1", "source": "trigger_1", "target": "parse" },
-    { "id": "e2", "source": "parse", "target": "create" },
-    { "id": "e3", "source": "create", "target": "out" }
+    { "id": "e2", "source": "parse", "target": "out" }
   ]
 }

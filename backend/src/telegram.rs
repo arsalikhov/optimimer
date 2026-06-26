@@ -29,6 +29,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Slash commands that route to a `cmd-<name>` agent.
 const COMMANDS: &[&str] = &["todo", "complete", "notify", "email", "note", "search_notes", "search_tasks", "list_todos", "list_notes", "spent", "earned"];
 
+/// Commands handled directly in the bot (no `cmd-<name>` agent). Kept in sync
+/// with the `match` in `dispatch_command`; used by `is_dispatchable` so a test
+/// can prove every command the router may emit actually has a handler.
+const DIRECT_COMMANDS: &[&str] = &[
+    "buy_later", "groceries", "clear_groceries", "to_buy", "clear_to_buy", "set_income", "income", "balance",
+];
+
+/// Can `dispatch_command` handle this command name?
+fn is_dispatchable(cmd: &str) -> bool {
+    DIRECT_COMMANDS.contains(&cmd) || COMMANDS.contains(&cmd)
+}
+
 /// Emitted by a command agent's Output when the LLM can't tell Sagemesh from
 /// Personal; the bot turns it into a two-button prompt and re-runs with the answer.
 const ASK_CATEGORY: &str = "ASK_CATEGORY";
@@ -37,7 +49,9 @@ const ASK_CATEGORY: &str = "ASK_CATEGORY";
 /// via sendRichMessage instead of plain Markdown. The marker is stripped first.
 const RICH_SENTINEL: &str = "<!rich>";
 
-/// A command awaiting the Sagemesh/Personal answer for a given chat.
+/// A chat's message awaiting a follow-up tap: either the Sagemesh/Personal
+/// category answer for `command`, or the original `text` of a message the router
+/// couldn't place and offered to salvage (then `command` is empty).
 #[derive(Clone)]
 struct Pending {
     command: String,
@@ -282,7 +296,9 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         return agents_reply(
             &state.store,
             "<b>Optimimer</b>\
-             <blockquote>Tap an agent below to select it, then send a message to run it.</blockquote>\
+             <blockquote>Just tell me what you want in plain language — \"remind me to call Sam at 4pm\", \
+             \"spent 20 on lunch\", \"what's my balance\" — and I'll route it to the right action. \
+             The /commands below still work, or tap an agent to select it and send a message to run it.</blockquote>\
              <b>Capture</b>\
              <ul>\
              <li>/todo — add a calendar-synced task</li>\
@@ -361,40 +377,155 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         };
     }
 
-    // Slash command → cmd-<name> agent.
+    // Explicit slash command → direct handler or cmd-<name> agent.
     if let Some(rest) = text.strip_prefix('/') {
         let mut parts = rest.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or("").to_lowercase();
         let body = parts.next().unwrap_or("").trim();
 
-        // Local shopping lists (no agent, no Notion — just per-chat JSON state).
-        match cmd.as_str() {
-            "buy_later" => return handle_buy_later(state, chat_id, body).await,
-            "groceries" => return list_reply(state, chat_id, ListKind::Grocery),
-            "clear_groceries" => return clear_reply(state, chat_id, ListKind::Grocery),
-            "to_buy" => return list_reply(state, chat_id, ListKind::Other),
-            "clear_to_buy" => return clear_reply(state, chat_id, ListKind::Other),
-            "set_income" | "income" => return handle_set_income(state, chat_id, body),
-            "balance" => return handle_balance(state, chat_id, body).await,
-            _ => {}
+        // A bare agent command (no argument) gets a usage hint instead of running empty.
+        if COMMANDS.contains(&cmd.as_str()) && body.is_empty() {
+            return Reply::text(format!("Usage: `/{cmd} <what you want>`"));
         }
-
-        if COMMANDS.contains(&cmd.as_str()) {
-            if body.is_empty() {
-                return Reply::text(format!("Usage: `/{cmd} <what you want>`"));
-            }
-            return run_command(state, chat_id, &cmd, body, "").await;
+        if let Some(reply) = dispatch_command(state, chat_id, &cmd, body).await {
+            return reply;
         }
-        // Unknown slash command falls through to the plain-text agent path.
+        // Unknown slash command falls through to the natural-language path.
     }
 
-    // Plain text → run the active agent (or the most recent one).
-    let wf = match active_or_recent(state, chat_id) {
-        Some(w) => w,
-        None => return Reply::text("No agents yet. Build one in the web UI, then come back."),
+    // An explicitly selected agent (via /use) owns plain text — power users can
+    // still drive a hand-built agent directly without the router in the way.
+    let explicit = state.active.lock().unwrap().get(&chat_id).cloned();
+    if let Some(wf) = explicit.and_then(|id| state.store.get(&id)) {
+        let result = engine::run(&wf, Value::String(text.to_string())).await;
+        return Reply::text(format_result(&wf.name, &result));
+    }
+
+    // Otherwise treat the message as natural language and route it to a command.
+    if let Some(reply) = route_natural(state, chat_id, text).await {
+        return reply;
+    }
+
+    Reply::text(
+        "I couldn't tell what you wanted. Try phrasing it as an action — \
+         \"remind me to call Sam at 4pm\", \"spent 20 on lunch\", \"what's my balance\" — \
+         or use a /command. To run a custom agent, build one in the web UI and pick it with /use.",
+    )
+}
+
+/// Dispatch a resolved command + argument to its handler — a direct handler
+/// (shopping lists, balance, income) or a `cmd-<name>` agent. Returns `None`
+/// when `cmd` is unknown so the caller can fall through. Shared by the
+/// slash-command path and the natural-language router so both reach exactly the
+/// same wiring.
+async fn dispatch_command(state: &BotState, chat_id: i64, cmd: &str, body: &str) -> Option<Reply> {
+    let reply = match cmd {
+        // Local shopping lists (no agent, no Notion — just per-chat JSON state).
+        "buy_later" => handle_buy_later(state, chat_id, body).await,
+        "groceries" => list_reply(state, chat_id, ListKind::Grocery),
+        "clear_groceries" => clear_reply(state, chat_id, ListKind::Grocery),
+        "to_buy" => list_reply(state, chat_id, ListKind::Other),
+        "clear_to_buy" => clear_reply(state, chat_id, ListKind::Other),
+        "set_income" | "income" => handle_set_income(state, chat_id, body),
+        "balance" => handle_balance(state, chat_id, body).await,
+        // Money capture: parse via the cmd-<name> agent, then create + dedup in Rust.
+        "spent" | "earned" => handle_money(state, chat_id, cmd, body).await,
+        _ if COMMANDS.contains(&cmd) => run_command(state, chat_id, cmd, body, "").await,
+        _ => return None,
     };
-    let result = engine::run(&wf, Value::String(text.to_string())).await;
-    Reply::text(format_result(&wf.name, &result))
+    Some(reply)
+}
+
+/// Route a free-text natural-language message to a command via the `cmd-route`
+/// agent, then dispatch it. Returns `None` when routing is unavailable or the
+/// model declines to pick a command (so the caller shows help / falls back).
+async fn route_natural(state: &BotState, chat_id: i64, text: &str) -> Option<Reply> {
+    let wf = state.store.get("cmd-route")?;
+    let tz = tz_for(state, chat_id);
+    let input = json!({
+        "text": text,
+        "now": now_in_tz(&tz),
+        "tz": tz,
+        "chat_id": chat_id.to_string(),
+    });
+    let result = engine::run(&wf, input).await;
+    let route: Value = serde_json::from_str(&output_text(&result)?).ok()?;
+    let cmd = route["command"].as_str().unwrap_or("").to_lowercase();
+    let body = route["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(text)
+        .to_string();
+
+    // Understood the message, but no command clearly fits → offer to salvage it
+    // rather than silently dropping it. (Distinct from the `None` we return when
+    // routing itself is unavailable — that path shows the static help instead.)
+    if cmd.is_empty() || cmd == "none" {
+        state.pending.lock().unwrap().insert(
+            chat_id,
+            Pending { command: String::new(), text: text.to_string() },
+        );
+        return Some(salvage_prompt());
+    }
+
+    // Router named a command we don't actually wire (a model hallucination) →
+    // salvage rather than dead-ending on "that agent isn't installed".
+    if !is_dispatchable(&cmd) {
+        state.pending.lock().unwrap().insert(
+            chat_id,
+            Pending { command: String::new(), text: text.to_string() },
+        );
+        return Some(salvage_prompt());
+    }
+
+    // A misheard word shouldn't wipe a list — confirm destructive actions that
+    // arrived via fuzzy natural language. (Typed /clear_* still runs instantly.)
+    if matches!(cmd.as_str(), "clear_groceries" | "clear_to_buy") {
+        return Some(confirm_clear_prompt(&cmd));
+    }
+
+    let reply = dispatch_command(state, chat_id, &cmd, &body).await?;
+    Some(with_breadcrumb(&cmd, reply))
+}
+
+/// Prepend a subtle "↳ /command" breadcrumb so a natural-language reply shows
+/// which command the router chose — a misroute is then visible at a glance.
+/// Only applied on the routed path; typed slash commands are self-evident.
+fn with_breadcrumb(cmd: &str, mut reply: Reply) -> Reply {
+    reply.text = format!("↳ /{cmd}\n{}", reply.text);
+    if let Some(html) = reply.rich_html.take() {
+        reply.rich_html = Some(format!("<blockquote>↳ /{cmd}</blockquote>{html}"));
+    }
+    reply
+}
+
+/// Buttons offered when the router can't confidently place a message, so an
+/// unclear capture is salvaged into a note/task instead of lost. The original
+/// text is stashed in `pending` for the callback to consume.
+fn salvage_prompt() -> Reply {
+    Reply {
+        text: "I wasn't sure which action you meant — save it as…?".into(),
+        keyboard: Some(json!({ "inline_keyboard": [[
+            { "text": "📝 Note", "callback_data": "salvage:note" },
+            { "text": "✅ Task", "callback_data": "salvage:todo" },
+            { "text": "Ignore", "callback_data": "salvage:ignore" }
+        ]]})),
+        rich_html: None,
+    }
+}
+
+/// Yes/Cancel confirmation before a natural-language request clears a list.
+fn confirm_clear_prompt(cmd: &str) -> Reply {
+    let label = if cmd == "clear_groceries" { "grocery" } else { "to-buy" };
+    Reply {
+        text: format!("Clear your {label} list? This can't be undone."),
+        keyboard: Some(json!({ "inline_keyboard": [[
+            { "text": "Yes, clear it", "callback_data": format!("confirm:{cmd}") },
+            { "text": "Cancel", "callback_data": "confirm:cancel" }
+        ]]})),
+        rich_html: None,
+    }
 }
 
 /// The two category buttons shown when a command needs a "which bucket?" answer.
@@ -470,6 +601,44 @@ async fn run_command(
     Reply::text(format_result(&wf.name, &result))
 }
 
+/// Capture a hand-logged transaction (`/spent`, `/earned`, or a receipt photo).
+/// The `cmd-<name>` agent only PARSES the text into JSON; the Notion create plus
+/// dedup (reject an identical fingerprint, flag a same-amount near-duplicate) is
+/// done in `finance::log_manual` so manual and CSV-imported rows stay consistent.
+async fn handle_money(state: &BotState, chat_id: i64, cmd: &str, body: &str) -> Reply {
+    if body.trim().is_empty() {
+        return Reply::text(format!("Usage: `/{cmd} <amount and what it was for>`"));
+    }
+    let wf = match state.store.get(&format!("cmd-{cmd}")) {
+        Some(w) => w,
+        None => return Reply::text(format!("The `/{cmd}` parser isn't installed (expected agent id `cmd-{cmd}`). Restart the backend to re-seed it.")),
+    };
+    let tz = tz_for(state, chat_id);
+    let now = now_in_tz(&tz);
+    let input = json!({
+        "text": body,
+        "now": now,
+        "tz": tz,
+        "chat_id": chat_id.to_string(),
+        "command": cmd,
+    });
+    let result = engine::run(&wf, input).await;
+    let parsed = output_text(&result).unwrap_or_default();
+    let kind = if cmd == "earned" {
+        crate::finance::ManualKind::Earned
+    } else {
+        crate::finance::ManualKind::Spent
+    };
+    let today = now.get(..10).unwrap_or(&now);
+    match crate::finance::log_manual(&parsed, kind, today).await {
+        Ok(logged) => match logged.html {
+            Some(html) => Reply::rich(html, logged.text),
+            None => Reply::text(logged.text),
+        },
+        Err(e) => Reply::text(format!("Couldn't log that: {e}")),
+    }
+}
+
 /// Crude HTML→plain-text for the rich-message fallback: drop tags, unescape the
 /// entities we emit. Good enough for the rare older-client / API-error path.
 fn strip_tags(html: &str) -> String {
@@ -537,6 +706,33 @@ async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, 
                 &Reply::text("That prompt expired — send the command again."),
             )
             .await;
+        }
+    }
+
+    // Confirm a destructive action (list clear) reached via natural language.
+    if let (Some(rest), Some(chat)) = (data.strip_prefix("confirm:"), chat_id) {
+        if rest == "cancel" {
+            note = "Cancelled".into();
+            send(client, api, chat, &Reply::text("Cancelled — nothing was changed.")).await;
+        } else if let Some(reply) = dispatch_command(state, chat, rest, "").await {
+            note = "Done".into();
+            send(client, api, chat, &reply).await;
+        }
+    }
+
+    // Salvage a message the router couldn't confidently place into note/task.
+    if let (Some(action), Some(chat)) = (data.strip_prefix("salvage:"), chat_id) {
+        let pending = state.pending.lock().unwrap().remove(&chat);
+        if action == "ignore" {
+            note = "Ignored".into();
+            send(client, api, chat, &Reply::text("OK — ignored.")).await;
+        } else if let Some(p) = pending {
+            note = format!("Saved via /{action}");
+            if let Some(reply) = dispatch_command(state, chat, action, &p.text).await {
+                send(client, api, chat, &with_breadcrumb(action, reply)).await;
+            }
+        } else {
+            send(client, api, chat, &Reply::text("That prompt expired — send it again.")).await;
         }
     }
 
@@ -629,26 +825,11 @@ async fn handle_voice(
     )
     .await;
 
-    // Route to a command via the cmd-route agent (returns {command, text}).
-    if let Some(wf) = state.store.get("cmd-route") {
-        let tz = tz_for(state, chat_id);
-        let input = json!({ "text": transcript, "now": now_in_tz(&tz), "tz": tz, "chat_id": chat_id.to_string() });
-        let result = engine::run(&wf, input).await;
-        if let Ok(route) = serde_json::from_str::<Value>(&output_text(&result).unwrap_or_default())
-        {
-            let cmd = route["command"].as_str().unwrap_or("").to_lowercase();
-            let text = route["text"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(transcript.as_str());
-            if COMMANDS.contains(&cmd.as_str()) {
-                let reply = run_command(state, chat_id, &cmd, text, "").await;
-                return send(client, api, chat_id, &reply).await;
-            }
-        }
+    // Route the transcript to a command exactly like a typed message; fall back
+    // to the normal message path (active agent / help) if nothing matched.
+    if let Some(reply) = route_natural(state, chat_id, &transcript).await {
+        return send(client, api, chat_id, &reply).await;
     }
-    // Fallback: treat the transcript as a normal message.
     let reply = handle_message(state, chat_id, &transcript).await;
     send(client, api, chat_id, &reply).await;
 }
@@ -686,7 +867,7 @@ async fn handle_receipt(
         Err(e) => return send(client, api, chat_id, &Reply::text(format!("Couldn't read the receipt: {e}"))).await,
     };
     send(client, api, chat_id, &Reply::text(format!("_{sentence}_"))).await;
-    let reply = run_command(state, chat_id, "spent", &sentence, "").await;
+    let reply = handle_money(state, chat_id, "spent", &sentence).await;
     send(client, api, chat_id, &reply).await;
 }
 
@@ -730,6 +911,13 @@ async fn handle_csv(
                     "\n{} card payment/transfer{} logged but excluded from /balance.",
                     s.transfers,
                     if s.transfers == 1 { "" } else { "s" }
+                ));
+            }
+            if s.flagged > 0 {
+                msg.push_str(&format!(
+                    "\n⚠️ {} row{} flagged as a *likely duplicate* (same amount as an existing transaction) — check its Note in Notion and delete if redundant.",
+                    s.flagged,
+                    if s.flagged == 1 { "" } else { "s" }
                 ));
             }
             Reply::text(msg)
@@ -1107,17 +1295,6 @@ fn now_in_tz(tz_name: &str) -> String {
 
 // ---- shared helpers (unchanged behaviour) ------------------------------------
 
-fn active_or_recent(state: &BotState, chat_id: i64) -> Option<Workflow> {
-    let wf_id = state.active.lock().unwrap().get(&chat_id).cloned();
-    wf_id.and_then(|id| state.store.get(&id)).or_else(|| {
-        state
-            .store
-            .list()
-            .into_iter()
-            .find(|w| !w.id.starts_with("cmd-"))
-    })
-}
-
 /// Build a reply listing agents as inline buttons (one per row). Command agents
 /// (`cmd-*`) are hidden — they're driven by slash commands, not selection.
 fn agents_reply(store: &Store, header: &str, rich: bool) -> Reply {
@@ -1306,5 +1483,68 @@ async fn send(client: &reqwest::Client, api: &str, chat_id: i64, reply: &Reply) 
         .await
     {
         tracing::warn!("sendMessage failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pull the command keywords the router is told it may emit out of the
+    /// bundled cmd-route agent's system prompt (the "- name: …" bullets).
+    fn router_commands() -> Vec<String> {
+        let wf: Value = serde_json::from_str(include_str!("../agents/cmd-route.json")).unwrap();
+        let sys = wf["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "router")
+            .unwrap()["data"]["system"]
+            .as_str()
+            .unwrap();
+        sys.lines()
+            .filter_map(|l| l.trim().strip_prefix("- "))
+            .filter_map(|l| l.split(':').next())
+            .map(|s| s.trim().to_string())
+            .collect()
+    }
+
+    /// Guard against drift: if someone teaches the router a new command but
+    /// forgets to wire it (or renames a handler), this fails instead of the bot
+    /// silently replying "that agent isn't installed".
+    #[test]
+    fn every_routed_command_is_dispatchable() {
+        let cmds = router_commands();
+        assert!(cmds.contains(&"todo".to_string()), "prompt parse found nothing");
+        for cmd in cmds {
+            assert!(
+                cmd == "none" || is_dispatchable(&cmd),
+                "router may emit '{cmd}' but dispatch_command can't handle it"
+            );
+        }
+    }
+
+    #[test]
+    fn breadcrumb_marks_text_and_rich() {
+        let r = with_breadcrumb("spent", Reply::text("Logged expense"));
+        assert!(r.text.starts_with("↳ /spent"));
+        assert!(r.text.contains("Logged expense"));
+
+        let r = with_breadcrumb("balance", Reply::rich("<b>$5</b>", "$5"));
+        let html = r.rich_html.unwrap();
+        assert!(html.starts_with("<blockquote>↳ /balance</blockquote>"));
+        assert!(html.contains("<b>$5</b>"));
+        assert!(r.text.starts_with("↳ /balance")); // fallback also marked
+    }
+
+    #[test]
+    fn confirm_targets_the_named_list() {
+        let r = confirm_clear_prompt("clear_groceries");
+        assert!(r.text.contains("grocery"));
+        let data = r.keyboard.unwrap()["inline_keyboard"][0][0]["callback_data"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(data, "confirm:clear_groceries");
     }
 }

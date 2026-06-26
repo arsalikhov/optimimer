@@ -108,6 +108,54 @@ fn fingerprint(date: &str, amount: f64, desc: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// How far apart (days) a CSV row and a hand-logged entry may sit and still be
+/// treated as the same transaction — absorbs the lag between a card's posting
+/// date and the day you typed `/spent`.
+const MANUAL_DUP_WINDOW_DAYS: i64 = 4;
+
+/// Whole days between two `YYYY-MM-DD` dates, or `None` if either won't parse.
+fn days_apart(a: &str, b: &str) -> Option<i64> {
+    let pa = chrono::NaiveDate::parse_from_str(a.get(0..10)?, "%Y-%m-%d").ok()?;
+    let pb = chrono::NaiveDate::parse_from_str(b.get(0..10)?, "%Y-%m-%d").ok()?;
+    Some((pa - pb).num_days().abs())
+}
+
+/// Reduce existing Finances pages to `(amount_cents, date, direction)` for the
+/// "same amount, different fingerprint" near-duplicate check.
+fn dup_index(pages: &[Value]) -> Vec<(i64, String, String)> {
+    pages
+        .iter()
+        .filter_map(|p| {
+            let props = &p["properties"];
+            let date = props["Date"]["date"]["start"].as_str().unwrap_or("").to_string();
+            if date.is_empty() {
+                return None;
+            }
+            let cents = (prop_number(props, "Amount").abs() * 100.0).round() as i64;
+            Some((cents, date, prop_select(props, "Direction")))
+        })
+        .collect()
+}
+
+/// A fingerprint catches a re-imported statement row exactly, but it can't bridge
+/// a hand-typed entry and the bank's version of it (different description, a
+/// posting date a day or two off). So when a new transaction shares an existing
+/// one's amount + direction within a few days but has a DIFFERENT fingerprint,
+/// flag it for manual review instead of guessing — return the Note text to stamp
+/// on it. (Date-bounded so a recurring same-amount charge weeks later is ignored.)
+fn likely_dup_note(prior: &[(i64, String, String)], cents: i64, direction: &str, date: &str) -> Option<String> {
+    let hit = prior.iter().find(|(c, d, dir)| {
+        *c == cents
+            && dir.eq_ignore_ascii_case(direction)
+            && days_apart(d, date).is_some_and(|n| n <= MANUAL_DUP_WINDOW_DAYS)
+    })?;
+    Some(format!(
+        "⚠️ Likely duplicate — same amount (${:.2}) and direction as an existing transaction dated {}. Review and delete if redundant.",
+        cents as f64 / 100.0,
+        hit.1.get(0..10).unwrap_or(&hit.1),
+    ))
+}
+
 fn money(x: f64) -> String {
     format!("${:.2}", x)
 }
@@ -381,6 +429,8 @@ pub struct ImportSummary {
     pub skipped: usize,
     /// Card payments / inter-account transfers — created but excluded from /balance.
     pub transfers: usize,
+    /// Created but tagged "likely duplicate" in their Note for you to review.
+    pub flagged: usize,
     pub parsed: usize,
 }
 
@@ -393,20 +443,23 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
     let rows = normalize_csv(csv, today, account_hint).await?;
     let parsed = rows.len();
     if parsed == 0 {
-        return Ok(ImportSummary { created: 0, skipped: 0, transfers: 0, parsed: 0 });
+        return Ok(ImportSummary { created: 0, skipped: 0, transfers: 0, flagged: 0, parsed: 0 });
     }
 
-    // Existing fingerprints already in the DB.
+    // Existing fingerprints (exact re-import dedup) and an amount/date/direction
+    // index (cross-source "likely duplicate" flagging) — both from one fetch.
     let existing_pages = crate::notion::query_raw(&db_id(), None, None).await?;
     let mut seen: HashSet<String> = existing_pages
         .iter()
         .map(|p| prop_rich(&p["properties"], "Key"))
         .filter(|k| !k.is_empty())
         .collect();
+    let prior = dup_index(&existing_pages);
 
     let mut created = 0;
     let mut skipped = 0;
     let mut transfers = 0;
+    let mut flagged = 0;
     let rents = rent_amounts();
     for r in rows {
         if r.amount == 0.0 && r.description.trim().is_empty() {
@@ -449,7 +502,16 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
         } else {
             (direction, category)
         };
-        let props = json!({
+
+        // Cross-source near-duplicate: this row's fingerprint is new, but its
+        // amount + direction matches an existing transaction within a few days
+        // (e.g. the bank's version of something you already logged by hand, or an
+        // overlapping statement with a reworded description). Import it anyway,
+        // but stamp a Note so you can eyeball it in Notion and delete if redundant.
+        let row_cents = (r.amount.abs() * 100.0).round() as i64;
+        let note = likely_dup_note(&prior, row_cents, direction, &date);
+
+        let mut props = json!({
             "Amount": { "number": r.amount.abs() },
             "Direction": { "select": { "name": direction } },
             "Category": { "select": { "name": category } },
@@ -457,6 +519,9 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
             "Source": { "select": { "name": "CSV" } },
             "Key": { "rich_text": [{ "text": { "content": key } }] },
         });
+        if let Some(n) = &note {
+            props["Note"] = json!({ "rich_text": [{ "text": { "content": n } }] });
+        }
         let op = crate::notion::Op {
             op: "create_page".to_string(),
             database_id: db_id(),
@@ -471,11 +536,130 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
                 if direction == "Transfer" {
                     transfers += 1;
                 }
+                if note.is_some() {
+                    flagged += 1;
+                }
             }
             Err(e) => tracing::warn!("finance import: failed to create row: {e}"),
         }
     }
-    Ok(ImportSummary { created, skipped, transfers, parsed })
+    Ok(ImportSummary { created, skipped, transfers, flagged, parsed })
+}
+
+/// A hand-logged transaction: an expense (`/spent`, receipt photo) or income (`/earned`).
+#[derive(Clone, Copy)]
+pub enum ManualKind {
+    Spent,
+    Earned,
+}
+
+/// A formatted confirmation to send back to Telegram. `html` is the rich body
+/// (with `text` as its fallback); when `html` is `None`, send `text` plain.
+pub struct Logged {
+    pub html: Option<String>,
+    pub text: String,
+}
+
+/// Create a hand-logged transaction from the parse agent's JSON
+/// (`{amount, merchant|source, category, date}`), applying the SAME dedup as CSV
+/// import so manual and imported rows can't double up:
+///   • identical fingerprint already in the DB → NOT added again (you double-tapped
+///     or re-sent it); the reply says so.
+///   • a different fingerprint but the same amount + direction within a few days →
+///     created, but flagged "likely duplicate" in its Note for you to review.
+/// Manual rows now carry a Key too, so a later CSV import can dedup against them.
+pub async fn log_manual(parsed_json: &str, kind: ManualKind, today: &str) -> Result<Logged> {
+    // The model is told to emit bare JSON, but tolerate stray code fences.
+    let cleaned = parsed_json
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let v: Value = serde_json::from_str(cleaned).map_err(|e| anyhow!("couldn't parse entry JSON: {e}"))?;
+
+    let amount = v["amount"]
+        .as_f64()
+        .or_else(|| v["amount"].as_str().and_then(|s| s.replace(['$', ','], "").trim().parse().ok()))
+        .unwrap_or(0.0)
+        .abs();
+    if amount == 0.0 {
+        return Ok(Logged {
+            html: None,
+            text: "I couldn't read an amount from that — try e.g. `/spent 24.50 on lunch`.".to_string(),
+        });
+    }
+    let date = {
+        let d = v["date"].as_str().unwrap_or("").trim();
+        if d.len() >= 10 { d[..10].to_string() } else { today.to_string() }
+    };
+    let (direction, title, category, noun, who) = match kind {
+        ManualKind::Spent => {
+            let title = v["merchant"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Expense").to_string();
+            ("Expense", title, clamp_category(v["category"].as_str().unwrap_or("Other")), "expense", "Merchant")
+        }
+        ManualKind::Earned => {
+            let title = v["source"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Income").to_string();
+            let cat = if v["category"].as_str().unwrap_or("").eq_ignore_ascii_case("Salary") { "Salary" } else { "Income" };
+            ("Income", title, cat.to_string(), "income", "Source")
+        }
+    };
+
+    let key = fingerprint(&date, amount, &title);
+    let existing = crate::notion::query_raw(&db_id(), None, None).await?;
+
+    // Exact fingerprint already present → don't create a second copy.
+    if existing.iter().any(|p| prop_rich(&p["properties"], "Key") == key) {
+        return Ok(Logged {
+            html: None,
+            text: format!("Already logged — {title} {} on {date} is already in your Finances DB (same name, amount and date). Not added again.", money(amount)),
+        });
+    }
+
+    let cents = (amount * 100.0).round() as i64;
+    let note = likely_dup_note(&dup_index(&existing), cents, direction, &date);
+
+    let mut props = json!({
+        "Amount": { "number": amount },
+        "Direction": { "select": { "name": direction } },
+        "Category": { "select": { "name": category } },
+        "Date": { "date": { "start": date } },
+        "Source": { "select": { "name": "Manual" } },
+        "Key": { "rich_text": [{ "text": { "content": key } }] },
+    });
+    if let Some(n) = &note {
+        props["Note"] = json!({ "rich_text": [{ "text": { "content": n } }] });
+    }
+    let op = crate::notion::Op {
+        op: "create_page".to_string(),
+        database_id: db_id(),
+        title: title.clone(),
+        title_prop: "Name".to_string(),
+        properties_json: props.to_string(),
+        ..Default::default()
+    };
+    let page = crate::notion::run(op).await?;
+    let url = page["url"].as_str().unwrap_or("");
+
+    let esc = crate::engine::html_escape;
+    let mut html = format!(
+        "<!rich><b>Logged {noun}</b>\n<table><tr><td>Amount</td><td>{}</td></tr><tr><td>{who}</td><td>{}</td></tr><tr><td>Category</td><td>{}</td></tr><tr><td>Date</td><td>{date}</td></tr></table>",
+        money(amount),
+        esc(&title),
+        esc(&category),
+    );
+    if !url.is_empty() {
+        html.push_str(&format!("\n<a href=\"{}\">Link to Notion page</a>", esc(url)));
+    }
+    if note.is_some() {
+        html.push_str("\n<blockquote>⚠️ Possible duplicate of an existing transaction — flagged in its Note so you can review and delete if redundant.</blockquote>");
+    }
+    let text = format!(
+        "Logged {noun}: {} — {title} ({category}){}",
+        money(amount),
+        if note.is_some() { " ⚠️ possible duplicate" } else { "" },
+    );
+    Ok(Logged { html: Some(html), text })
 }
 
 /// Ask an LLM to turn raw CSV text into a clean JSON array of transactions.

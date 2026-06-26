@@ -177,7 +177,13 @@ wins.
    refuses everyone else.
 3. Restart the backend. You'll see `Telegram bot started (long polling)`.
 
-The bot registers a native "/" menu (`setMyCommands`). Most slash commands map to bundled agents in
+**You don't have to use slash commands.** Just type (or speak) what you want in plain language — "remind me to call
+Sam at 4pm", "spent 20 on lunch", "what's my balance", "add milk to my list" — and a small router agent
+(`agents/cmd-route.json`, Haiku) classifies it and runs the matching command in the background. The slash commands
+below are still wired up and run the exact same agents; natural language is just a front door to them. (An agent you
+pick with `/use` takes over plain text, so the router stays out of the way while you're driving a custom agent.)
+
+The bot also registers a native "/" menu (`setMyCommands`). Most slash commands map to bundled agents in
 `agents/cmd-*.json` (re-seeded from disk on every start, so edit the JSON to change behaviour); a few are handled
 directly in the bot. Multi-word commands use underscores (Telegram only links `[a-z0-9_]`). Built-ins:
 
