@@ -401,6 +401,12 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
         return Reply::text(format_result(&wf.name, &result));
     }
 
+    // Experimental tool-calling agent (opt-in via AGENT_MODE): the model picks and
+    // chains tools itself instead of routing to a single command.
+    if agent_mode() {
+        return run_agent(state, chat_id, text).await;
+    }
+
     // Otherwise treat the message as natural language and route it to a command.
     if let Some(reply) = route_natural(state, chat_id, text).await {
         return reply;
@@ -637,6 +643,164 @@ async fn handle_money(state: &BotState, chat_id: i64, cmd: &str, body: &str) -> 
         },
         Err(e) => Reply::text(format!("Couldn't log that: {e}")),
     }
+}
+
+// ---- Agent mode: tool-calling loop ------------------------------------------
+
+/// Is the experimental tool-calling agent loop enabled? Off unless AGENT_MODE is
+/// truthy, so it never disturbs the default natural-language routing.
+fn agent_mode() -> bool {
+    matches!(
+        std::env::var("AGENT_MODE").unwrap_or_default().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn agent_model() -> String {
+    std::env::var("AGENT_MODEL").unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string())
+}
+
+/// Hard cap on tool round-trips per message, so a confused model can't loop forever.
+const AGENT_MAX_STEPS: usize = 6;
+
+fn tool_def(name: &str, description: &str, parameters: Value) -> Value {
+    json!({ "type": "function", "function": { "name": name, "description": description, "parameters": parameters } })
+}
+
+/// OpenAI-style schemas for everything the agent can do. Each name is handled in
+/// `exec_tool`, which dispatches to the same capabilities the slash commands use.
+fn agent_tools() -> Value {
+    json!([
+        tool_def("log_expense", "Record money the user spent (an expense).", json!({
+            "type": "object",
+            "properties": {
+                "amount": { "type": "number", "description": "Positive amount spent." },
+                "merchant": { "type": "string", "description": "Store / payee, e.g. 'Ali Baba Shawarma'." },
+                "category": { "type": "string", "description": "One of: Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Loans, Cash, Other." },
+                "date": { "type": "string", "description": "YYYY-MM-DD; omit for today." }
+            },
+            "required": ["amount", "merchant"]
+        })),
+        tool_def("log_income", "Record money the user received (income).", json!({
+            "type": "object",
+            "properties": {
+                "amount": { "type": "number" },
+                "source": { "type": "string", "description": "Where it came from, e.g. 'Paycheck'." },
+                "category": { "type": "string", "description": "'Salary' for regular wages/payroll, otherwise 'Income'." },
+                "date": { "type": "string", "description": "YYYY-MM-DD; omit for today." }
+            },
+            "required": ["amount", "source"]
+        })),
+        tool_def("get_balance", "Show income vs expenses for a week or a month.", json!({
+            "type": "object",
+            "properties": { "period": { "type": "string", "description": "'' = this week, 'last', a number of weeks ago, or a month like 'june' / 'may 2025'." } }
+        })),
+        tool_def("add_shopping_item", "Add an item to the shopping list (auto-sorted into groceries vs other).", json!({
+            "type": "object",
+            "properties": { "item": { "type": "string" } },
+            "required": ["item"]
+        })),
+        tool_def("show_shopping_list", "Show a shopping list.", json!({
+            "type": "object",
+            "properties": { "which": { "type": "string", "enum": ["groceries", "to_buy"] } }
+        })),
+        tool_def("save_note", "Save a free-form note for later.", json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"]
+        })),
+        tool_def("create_task", "Create a calendar-synced task, meeting, or appointment.", json!({
+            "type": "object",
+            "properties": { "text": { "type": "string", "description": "The task in natural language, including any time/date." } },
+            "required": ["text"]
+        })),
+        tool_def("set_reminder", "Schedule a Telegram reminder ping at a future time.", json!({
+            "type": "object",
+            "properties": { "text": { "type": "string", "description": "What to be reminded of and when, e.g. 'pay rent tomorrow 9am'." } },
+            "required": ["text"]
+        }))
+    ])
+}
+
+/// One tool invocation → a short text observation fed back to the model. Reuses
+/// the very same handlers the slash commands and router call, so behaviour
+/// (dedup, list sorting, Notion writes) stays identical across entry points.
+async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: &Value) -> String {
+    let tz = tz_for(state, chat_id);
+    let today: String = now_in_tz(&tz).chars().take(10).collect();
+    let str_arg = |k: &str| args[k].as_str().unwrap_or("").to_string();
+    match name {
+        "log_expense" => {
+            let entry = json!({ "amount": args["amount"], "merchant": args["merchant"], "category": args["category"], "date": args["date"] });
+            match crate::finance::log_manual(&entry.to_string(), crate::finance::ManualKind::Spent, &today).await {
+                Ok(l) => l.text,
+                Err(e) => format!("Failed to log expense: {e}"),
+            }
+        }
+        "log_income" => {
+            let entry = json!({ "amount": args["amount"], "source": args["source"], "category": args["category"], "date": args["date"] });
+            match crate::finance::log_manual(&entry.to_string(), crate::finance::ManualKind::Earned, &today).await {
+                Ok(l) => l.text,
+                Err(e) => format!("Failed to log income: {e}"),
+            }
+        }
+        "get_balance" => handle_balance(state, chat_id, &str_arg("period")).await.text,
+        "add_shopping_item" => handle_buy_later(state, chat_id, &str_arg("item")).await.text,
+        "show_shopping_list" => {
+            let kind = if args["which"].as_str() == Some("to_buy") { ListKind::Other } else { ListKind::Grocery };
+            list_reply(state, chat_id, kind).text
+        }
+        "save_note" => run_command(state, chat_id, "note", &str_arg("text"), "").await.text,
+        "create_task" => run_command(state, chat_id, "todo", &str_arg("text"), "").await.text,
+        "set_reminder" => run_command(state, chat_id, "notify", &str_arg("text"), "").await.text,
+        other => format!("(no such tool: {other})"),
+    }
+}
+
+/// Run one user message through the tool-calling loop: the model decides which
+/// tool(s) to call (it may chain several), we execute each and feed results
+/// back, and its first tool-free turn is the reply.
+async fn run_agent(state: &BotState, chat_id: i64, user_text: &str) -> Reply {
+    let tz = tz_for(state, chat_id);
+    let now = now_in_tz(&tz);
+    let tools = agent_tools();
+    let system = format!(
+        "You are Optimimer, a personal assistant for ONE user over Telegram. Now: {now} ({tz}). \
+         Use the provided tools to act on requests: logging expenses/income, checking finances, \
+         managing the shopping list, saving notes, creating tasks, and setting reminders. Call \
+         several tools in one turn when the user asks for several things. Extract concrete values \
+         (amounts, merchants, dates) yourself instead of asking back. After the tools run, reply in \
+         one or two short plain-text sentences confirming what you did. If no tool fits (small talk \
+         or a general question), just answer briefly. Never fabricate tool results."
+    );
+    let mut messages = vec![
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user_text }),
+    ];
+
+    for _ in 0..AGENT_MAX_STEPS {
+        let msg = match crate::openrouter::chat_tools(&agent_model(), &messages, &tools).await {
+            Ok(m) => m,
+            Err(e) => return Reply::text(format!("Agent error: {e}")),
+        };
+        let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+        if calls.is_empty() {
+            let content = msg["content"].as_str().unwrap_or("").trim();
+            return Reply::text(if content.is_empty() { "Done." } else { content });
+        }
+        messages.push(msg.clone());
+        for call in calls {
+            let id = call["id"].as_str().unwrap_or("").to_string();
+            let name = call["function"]["name"].as_str().unwrap_or("").to_string();
+            let cargs: Value = call["function"]["arguments"]
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| json!({}));
+            let observation = exec_tool(state, chat_id, &name, &cargs).await;
+            messages.push(json!({ "role": "tool", "tool_call_id": id, "content": observation }));
+        }
+    }
+    Reply::text("I couldn't finish that within a few steps — try breaking it into simpler requests.")
 }
 
 /// Crude HTML→plain-text for the rich-message fallback: drop tags, unescape the
