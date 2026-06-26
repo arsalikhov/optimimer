@@ -225,7 +225,7 @@ pub async fn weekly_balance(
         { "property": "Date", "date": { "on_or_after": monday.to_string() } },
         { "property": "Date", "date": { "before": next_monday.to_string() } }
     ]});
-    period_balance(filter, title, range, monthly_income / WEEKS_PER_MONTH, monthly_income, "· salary (budgeted/wk)").await
+    period_balance(filter, title, range, monthly_income / WEEKS_PER_MONTH, monthly_income).await
 }
 
 /// Monthly balance for a specific calendar month. The salary budget is the full
@@ -247,19 +247,18 @@ pub async fn monthly_balance(
         { "property": "Date", "date": { "on_or_after": start.to_string() } },
         { "property": "Date", "date": { "before": end.to_string() } }
     ]});
-    period_balance(filter, title, range, monthly_income, monthly_income, "· salary (budgeted)").await
+    period_balance(filter, title, range, monthly_income, monthly_income).await
 }
 
 /// Shared balance core: query the period, tally income/expenses/refunds/transfers,
 /// render rich HTML + a plain fallback. `salary_budget` is the budgeted salary for
-/// the period (a weekly slice or a whole month); `budget_label` labels its row.
+/// the period (a weekly slice or a whole month).
 async fn period_balance(
     filter: Value,
     title: String,
     range: String,
     salary_budget: f64,
     monthly_income: f64,
-    budget_label: &str,
 ) -> Result<(String, String)> {
     let pages = crate::notion::query_raw(&db_id(), Some(filter), None).await?;
 
@@ -344,8 +343,7 @@ async fn period_balance(
 
     let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
-        let label = if use_slice { budget_label.trim_start_matches("· ") } else { "salary (logged)" };
-        rows.push_str(&row(&sub(label), &money(salary_component), ""));
+        rows.push_str(&row(&sub("salary"), &money(salary_component), ""));
     }
     if other_income > 0.0 {
         rows.push_str(&row(&sub("other income"), &money(other_income), ""));
