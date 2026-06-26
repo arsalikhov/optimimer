@@ -1707,6 +1707,11 @@ async fn send(client: &reqwest::Client, api: &str, chat_id: i64, reply: &Reply) 
     });
     if let Some(kb) = &reply.keyboard {
         body["reply_markup"] = kb.clone();
+    } else {
+        // Dismiss any lingering custom reply keyboard (notably the /where "Share
+        // location" button) so it doesn't sit stuck in the input bar. Harmless
+        // no-op when none is showing; doesn't touch inline keyboards.
+        body["reply_markup"] = json!({ "remove_keyboard": true });
     }
     if let Err(e) = client
         .post(format!("{api}/sendMessage"))
