@@ -33,7 +33,7 @@ const COMMANDS: &[&str] = &["todo", "complete", "notify", "email", "note", "sear
 /// with the `match` in `dispatch_command`; used by `is_dispatchable` so a test
 /// can prove every command the router may emit actually has a handler.
 const DIRECT_COMMANDS: &[&str] = &[
-    "buy_later", "groceries", "clear_groceries", "to_buy", "clear_to_buy", "set_income", "income", "balance",
+    "buy_later", "groceries", "grocery_shopping", "clear_groceries", "to_buy", "clear_to_buy", "set_income", "income", "balance",
 ];
 
 /// Can `dispatch_command` handle this command name?
@@ -325,7 +325,8 @@ async fn handle_message(state: &BotState, chat_id: i64, text: &str) -> Reply {
              <b>Lists</b>\
              <ul>\
              <li>/buy_later — add an item (auto-sorts grocery vs other)</li>\
-             <li>/groceries — show grocery list · /clear_groceries — clear it</li>\
+             <li>/groceries — show grocery list (text) · /clear_groceries — clear it</li>\
+             <li>/grocery_shopping — interactive checklist, tap to cross off as you shop</li>\
              <li>/to_buy — show non-grocery list · /clear_to_buy — clear it</li>\
              </ul>",
             true,
@@ -429,6 +430,7 @@ async fn dispatch_command(state: &BotState, chat_id: i64, cmd: &str, body: &str)
         // Local shopping lists (no agent, no Notion — just per-chat JSON state).
         "buy_later" => handle_buy_later(state, chat_id, body).await,
         "groceries" => list_reply(state, chat_id, ListKind::Grocery),
+        "grocery_shopping" => handle_grocery_shopping(state, chat_id),
         "clear_groceries" => clear_reply(state, chat_id, ListKind::Grocery),
         "to_buy" => list_reply(state, chat_id, ListKind::Other),
         "clear_to_buy" => clear_reply(state, chat_id, ListKind::Other),
@@ -900,6 +902,51 @@ async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, 
         }
     }
 
+    // Grocery checklist: toggle the tapped item's strike-through in place.
+    if let (true, Some(chat)) = (data.starts_with("shop:"), chat_id) {
+        let msg_id = cb["message"]["message_id"].as_i64();
+        let board = &cb["message"]["reply_markup"]["inline_keyboard"];
+        if let (Some(mid), Some(rows)) = (msg_id, board.as_array()) {
+            let new_board: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    let btns: Vec<Value> = row
+                        .as_array()
+                        .map(|r| r.as_slice())
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|btn| {
+                            let cd = btn["callback_data"].as_str().unwrap_or("");
+                            let txt = btn["text"].as_str().unwrap_or("");
+                            // Only the tapped button flips; the rest pass through.
+                            let text = if cd != data {
+                                txt.to_string()
+                            } else if let Some(rest) = txt.strip_prefix("✅ ") {
+                                format!("▫️ {}", unstrike(rest))
+                            } else if let Some(rest) = txt.strip_prefix("▫️ ") {
+                                format!("✅ {}", strike(rest))
+                            } else {
+                                txt.to_string()
+                            };
+                            json!({ "text": text, "callback_data": cd })
+                        })
+                        .collect();
+                    json!(btns)
+                })
+                .collect();
+            let _ = client
+                .post(format!("{api}/editMessageReplyMarkup"))
+                .json(&json!({
+                    "chat_id": chat,
+                    "message_id": mid,
+                    "reply_markup": { "inline_keyboard": new_board }
+                }))
+                .send()
+                .await;
+            note = "✓".into();
+        }
+    }
+
     let _ = client
         .post(format!("{api}/answerCallbackQuery"))
         .json(&json!({ "callback_query_id": cb_id, "text": note }))
@@ -1214,7 +1261,7 @@ async fn handle_balance(state: &BotState, chat_id: i64, body: &str) -> Reply {
         crate::finance::weekly_balance(&tz, income, parse_weeks_ago(body)).await
     };
     match result {
-        Ok((html, fallback)) => Reply::rich(html, fallback),
+        Ok(md) => Reply::text(md),
         Err(e) => Reply::text(format!("Couldn't compute the balance: {e}")),
     }
 }
@@ -1393,37 +1440,57 @@ fn str_vec(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A plain-text list — deliberately NOT a rich card, so calling `/groceries`
+/// repeatedly doesn't clutter the chat with big boxes. For an interactive,
+/// tap-to-check version use `/grocery_shopping`.
 fn list_reply(state: &BotState, chat_id: i64, kind: ListKind) -> Reply {
     let lists = get_lists(state, chat_id);
     let items = kind.items(&lists);
     if items.is_empty() {
         return Reply::text(format!("Your {} list is empty.", kind.noun()));
     }
-    // Real Telegram table (sendRichMessage): a numbered row per item.
-    let rows: String = items
+    let mut text = format!("*{}* ({})\n", kind.title(), items.len());
+    for (i, it) in items.iter().enumerate() {
+        text.push_str(&format!("{}. {}\n", i + 1, it));
+    }
+    Reply::text(text.trim_end().to_string())
+}
+
+/// `/grocery_shopping` — an interactive checklist: one inline button per grocery
+/// item; tapping toggles a strike-through so you can tick things off while you
+/// shop without spamming the chat. State lives in the message's own keyboard
+/// (see the `shop:` branch in `handle_callback`), so no extra storage is needed.
+fn handle_grocery_shopping(state: &BotState, chat_id: i64) -> Reply {
+    let lists = get_lists(state, chat_id);
+    let items = &lists.groceries;
+    if items.is_empty() {
+        return Reply::text("Your grocery list is empty. Add items with /buy_later first.");
+    }
+    let rows: Vec<Value> = items
         .iter()
         .enumerate()
-        .map(|(i, it)| {
-            format!(
-                "<tr><td>{}</td><td>{}</td></tr>",
-                i + 1,
-                crate::engine::html_escape(it)
-            )
-        })
+        .map(|(i, it)| json!([{ "text": format!("▫️ {it}"), "callback_data": format!("shop:{i}") }]))
         .collect();
-    let html = format!(
-        "<b>{} ({})</b>\n<table>{}</table>",
-        kind.title(),
-        items.len(),
-        rows
-    );
-    let fallback = items
-        .iter()
-        .enumerate()
-        .map(|(i, it)| format!("{}. {}", i + 1, it))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Reply::rich(html, format!("{} ({})\n{}", kind.title(), items.len(), fallback))
+    Reply {
+        text: format!("🛒 Shopping list ({}) — tap an item to check it off:", items.len()),
+        keyboard: Some(json!({ "inline_keyboard": rows })),
+        rich_html: None,
+    }
+}
+
+/// Overlay each character with a combining strike (U+0336) so a checklist item
+/// reads as visibly crossed-out inside an inline-keyboard button (which can't
+/// carry rich formatting). `unstrike` reverses it.
+fn strike(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        out.push(c);
+        out.push('\u{0336}');
+    }
+    out
+}
+fn unstrike(s: &str) -> String {
+    s.chars().filter(|c| *c != '\u{0336}').collect()
 }
 
 fn clear_reply(state: &BotState, chat_id: i64, kind: ListKind) -> Reply {
@@ -1593,7 +1660,8 @@ async fn register_commands(client: &reqwest::Client, api: &str) {
             { "command": "balance",         "description": "This week's income vs expenses" },
             { "command": "set_income",      "description": "Set your monthly income" },
             { "command": "buy_later",       "description": "Add an item (auto-sorts grocery vs other)" },
-            { "command": "groceries",       "description": "Show the grocery list" },
+            { "command": "groceries",       "description": "Show the grocery list (text)" },
+            { "command": "grocery_shopping","description": "Interactive checklist — tap to cross off" },
             { "command": "clear_groceries", "description": "Clear the grocery list" },
             { "command": "to_buy",          "description": "Show the non-grocery to-buy list" },
             { "command": "clear_to_buy",    "description": "Clear the to-buy list" },

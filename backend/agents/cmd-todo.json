@@ -49,7 +49,7 @@
       "id": "out",
       "type": "output",
       "position": { "x": 1500, "y": 220 },
-      "data": { "label": "Confirm", "value": "<!rich><b>{{html:parse.json.title}}</b>\n<table><tr><td>Priority</td><td>{{html:parse.json.priority_badge}}</td></tr><tr><td>Date</td><td>{{html:dt.human}} – {{html:dt.human_end}}</td></tr><tr><td>Status</td><td>{{html:parse.json.status}}</td></tr></table>\nPushed to calendar\n<a href=\"{{html:create.url}}\">Link to Notion page</a>" }
+      "data": { "label": "Confirm", "value": "<!rich><b>{{html:parse.json.title}}</b>\n<table><tr><td>Priority</td><td>{{html:parse.json.priority_badge}}</td></tr><tr><td>Date</td><td>{{html:dt.human}} – {{html:dt.human_end}}</td></tr><tr><td>Status</td><td>{{html:parse.json.status}}</td></tr></table>\n<i>Pushed to calendar · <a href=\"{{html:create.url}}\">view in Notion</a></i>" }
     }
   ],
   "edges": [
