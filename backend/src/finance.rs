@@ -160,6 +160,35 @@ fn money(x: f64) -> String {
     format!("${:.2}", x)
 }
 
+/// A category-fitting emoji to lead a /balance sub-row, so each line is glanceable.
+fn row_emoji(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    if n.contains("salary") {
+        return "💰";
+    }
+    if n.contains("other income") {
+        return "💵";
+    }
+    if n.contains("refund") {
+        return "↩️";
+    }
+    match n.as_str() {
+        "groceries" => "🛒",
+        "dining" => "🍽️",
+        "transport" => "🚗",
+        "housing" => "🏠",
+        "utilities" => "💡",
+        "health" => "🏥",
+        "entertainment" => "🎬",
+        "shopping" => "🛍️",
+        "subscriptions" => "🔁",
+        "travel" => "✈️",
+        "loans" => "🏦",
+        "cash" => "🏧",
+        _ => "▫️",
+    }
+}
+
 const MONTH_NAMES: [&str; 12] = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -303,11 +332,13 @@ async fn period_balance(
         format!("<tr><td>{label}</td><td>{amount}</td><td>{percent}</td></tr>")
     };
     // Indent sub-rows under their category with non-breaking spaces (plain
-    // leading spaces collapse in the renderer) so the hierarchy is obvious.
-    let sub = |name: &str| format!("\u{00A0}\u{00A0}\u{00A0}· {}", esc(name));
+    // leading spaces collapse in the renderer) and lead with a category-fitting
+    // emoji, which reads more clearly than a small bullet.
+    let sub = |name: &str| format!("\u{00A0}\u{00A0}{} {}", row_emoji(name), esc(name));
     // The renderer draws no border between body rows, so divide the sections
-    // with a full-width rule row — long enough to reach the right edge.
-    let sep = format!("<tr><td colspan=\"3\">{}</td></tr>", "─".repeat(52));
+    // with a near-full-width rule row. Kept just under the table width so the
+    // line doesn't wrap a stray dash onto the next line.
+    let sep = format!("<tr><td colspan=\"3\">{}</td></tr>", "─".repeat(48));
 
     let mut rows = row("<b>Income</b>", &money(total_income), "");
     if salary_component > 0.0 {
