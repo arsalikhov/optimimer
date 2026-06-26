@@ -906,9 +906,9 @@ async fn handle_callback(client: &reqwest::Client, api: &str, state: &BotState, 
                             let text = if cd != data {
                                 txt.to_string()
                             } else if let Some(rest) = txt.strip_prefix("✅ ") {
-                                format!("▫️ {}", unstrike(rest))
+                                format!("▫️ {rest}")
                             } else if let Some(rest) = txt.strip_prefix("▫️ ") {
-                                format!("✅ {}", strike(rest))
+                                format!("✅ {rest}")
                             } else {
                                 txt.to_string()
                             };
@@ -1441,9 +1441,10 @@ fn list_reply(state: &BotState, chat_id: i64, kind: ListKind) -> Reply {
 }
 
 /// `/grocery_shopping` — an interactive checklist: one inline button per grocery
-/// item; tapping toggles a strike-through so you can tick things off while you
-/// shop without spamming the chat. State lives in the message's own keyboard
-/// (see the `shop:` branch in `handle_callback`), so no extra storage is needed.
+/// item; tapping toggles a ✅/▫️ check so you can tick things off while you shop
+/// without spamming the chat. (Buttons can't carry real strikethrough, and the
+/// combining-character fake mangles on mobile, so a check prefix it is.) State
+/// lives in the message's own keyboard (see `shop:` in `handle_callback`).
 fn handle_grocery_shopping(state: &BotState, chat_id: i64) -> Reply {
     let lists = get_lists(state, chat_id);
     let items = &lists.groceries;
@@ -1460,21 +1461,6 @@ fn handle_grocery_shopping(state: &BotState, chat_id: i64) -> Reply {
         keyboard: Some(json!({ "inline_keyboard": rows })),
         rich_html: None,
     }
-}
-
-/// Overlay each character with a combining strike (U+0336) so a checklist item
-/// reads as visibly crossed-out inside an inline-keyboard button (which can't
-/// carry rich formatting). `unstrike` reverses it.
-fn strike(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for c in s.chars() {
-        out.push(c);
-        out.push('\u{0336}');
-    }
-    out
-}
-fn unstrike(s: &str) -> String {
-    s.chars().filter(|c| *c != '\u{0336}').collect()
 }
 
 fn clear_reply(state: &BotState, chat_id: i64, kind: ListKind) -> Reply {
