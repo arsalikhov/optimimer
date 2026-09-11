@@ -4,6 +4,7 @@
 //! extraction and summary folding run in the background after each reply.
 
 use super::*;
+use crate::config;
 use crate::memory;
 
 pub(super) fn agent_model() -> String {
@@ -93,9 +94,20 @@ pub(super) fn agent_tools() -> Value {
         tool_def("watch_stock", "Watch a product URL and ping the user when it is back in stock.", obj(json!({ "url": { "type": "string" } }), &["url"])),
         tool_def("list_watches", "Show active stock watches (displayed directly).", obj(json!({}), &[])),
         tool_def("unwatch", "Stop a stock watch by number, or 'all'.", obj(json!({ "which": { "type": "string" } }), &["which"])),
-        tool_def("wake_mercury", "Wake the user's HPC server 'mercury' via Wake-on-LAN.", obj(json!({}), &[])),
+        tool_def("wake_machine", "Wake one of the user's registered machines via Wake-on-LAN. Omit the name when only one is registered.", obj(json!({ "name": { "type": "string" } }), &[])),
         // ---- settings ----
-        tool_def("set_timezone", "Set the user's IANA timezone, e.g. 'America/Toronto'.", obj(json!({ "tz": { "type": "string" } }), &["tz"])),
+        tool_def("set_timezone", "Set the user's IANA timezone, e.g. 'Europe/Berlin'.", obj(json!({ "tz": { "type": "string" } }), &["tz"])),
+        tool_def("show_settings", "Show the assistant's settings: the user's name, timezone, categories, machines, voice vocabulary, paired chats (displayed directly).", obj(json!({}), &[])),
+        tool_def("set_name", "Set what the assistant calls the user.", obj(json!({ "name": { "type": "string" } }), &["name"])),
+        tool_def("add_machine", "Register (or update) a machine for Wake-on-LAN by name and MAC address; the network interface defaults to eth0.", obj(json!({
+            "name": { "type": "string" }, "mac": { "type": "string", "description": "e.g. aa:bb:cc:dd:ee:ff" }, "iface": { "type": "string" }
+        }), &["name", "mac"])),
+        tool_def("remove_machine", "Forget a Wake-on-LAN machine by name.", obj(json!({ "name": { "type": "string" } }), &["name"])),
+        tool_def("set_categories", "Replace the task/note categories (owner only; the user confirms with a button). Pass 'Name: hint, Name: hint, …' with the catch-all last. Never call this just because a task doesn't fit — only when the user asks to change the categories.", obj(json!({ "list": { "type": "string" } }), &["list"])),
+        tool_def("add_vocab", "Add words the voice transcriber should spell correctly (names, brands, jargon).", obj(json!({ "terms": { "type": "string", "description": "comma-separated" } }), &["terms"])),
+        tool_def("invite_user", "Create a one-time invite code that lets another Telegram account use this assistant (owner only).", obj(json!({}), &[])),
+        tool_def("remove_user", "Revoke a member's access by their name or chat id (owner only; the owner can't be removed).", obj(json!({ "who": { "type": "string" } }), &["who"])),
+        tool_def("restart_setup", "Run the first-time setup dialogue again (name, timezone, categories, machine).", obj(json!({}), &[])),
     ])
 }
 
@@ -212,14 +224,59 @@ pub(super) async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: 
         "watch_stock" => observe(handle_watch(chat_id, &s("url")).text),
         "list_watches" => display(watches_reply(chat_id)),
         "unwatch" => observe(handle_unwatch(chat_id, &s("which")).text),
-        "wake_mercury" => observe(handle_wake_mercury().await.text),
+        "wake_machine" => observe(handle_wake(&s("name")).await.text),
         "set_timezone" => {
             let name = s("tz");
             match name.parse::<chrono_tz::Tz>() {
-                Ok(_) => { set_tz(state, chat_id, &name); observe(format!("Timezone set to {name}.")) }
+                Ok(_) => {
+                    set_tz(state, chat_id, &name);
+                    if state.is_owner(chat_id) { config::set(config::TIMEZONE, &name); }
+                    observe(format!("Timezone set to {name}."))
+                }
                 Err(_) => observe(format!("'{name}' is not a valid IANA timezone.")),
             }
         }
+        "show_settings" => display(settings_reply(state, chat_id)),
+        "set_name" => {
+            let n = s("name");
+            if n.is_empty() { return observe("Name missing."); }
+            config::set_chat_name(chat_id, &n);
+            if state.is_owner(chat_id) { config::set(config::OWNER_NAME, &n); }
+            observe(format!("Name set to {n}."))
+        }
+        "add_machine" => match config::add_machine(&s("name"), &s("mac"), &s("iface")) {
+            Some(m) => observe(format!("Machine {} registered ({} via {}).", m.name, m.mac, m.iface)),
+            None => observe("Couldn't register it: need a name and a MAC address like aa:bb:cc:dd:ee:ff."),
+        },
+        "remove_machine" => observe(if config::remove_machine(&s("name")) { "Machine removed." } else { "No machine by that name." }),
+        "set_categories" => {
+            if !state.is_owner(chat_id) { return observe("Only the owner can change the categories."); }
+            let parsed = crate::vault::parse_categories(&s("list"));
+            if parsed.len() < 2 { return observe("Need at least two categories as 'Name: hint, Name: hint'."); }
+            let names = parsed.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ");
+            state.pending.lock().unwrap().insert(chat_id, Pending { command: "set_categories".into(), text: s("list") });
+            confirm(&format!("Replace the categories with: {names}? Existing tasks keep the category they have."), "set_categories")
+        }
+        "add_vocab" => {
+            let terms: Vec<String> = s("terms").split(',').map(|t| t.trim().to_string()).collect();
+            observe(format!("Voice vocabulary is now: {}", config::add_vocab(&terms).join(", ")))
+        }
+        "invite_user" => {
+            if !state.is_owner(chat_id) { return observe("Only the owner can invite people."); }
+            let code = config::new_invite();
+            observe(format!("Invite code: {code} — they message this bot and send it; it works once."))
+        }
+        "remove_user" => {
+            if !state.is_owner(chat_id) { return observe("Only the owner can remove people."); }
+            let who = s("who");
+            let target = config::chats().into_iter().find(|c| c.chat_id.to_string() == who || (!c.name.is_empty() && c.name.eq_ignore_ascii_case(&who)));
+            match target {
+                Some(c) if config::remove_chat(c.chat_id) => observe(format!("Removed {} ({}).", if c.name.is_empty() { "that chat".to_string() } else { c.name }, c.chat_id)),
+                Some(_) => observe("The owner can't be removed."),
+                None => observe("No paired chat matches that name or id."),
+            }
+        }
+        "restart_setup" => display(onboarding::start(chat_id, state.is_owner(chat_id), &config::chat_name(chat_id))),
         other => observe(format!("(no such tool: {other})")),
     }
 }
@@ -228,10 +285,19 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
     let tz = tz_for(state, chat_id);
     let now = now_in_tz(&tz);
     let cats = crate::vault::categories().iter().map(|(n, h)| format!("{n} ({h})")).collect::<Vec<_>>().join("; ");
+    let name = { let n = config::chat_name(chat_id); if n.is_empty() { config::owner_name() } else { n } };
+    let who = if name.is_empty() { String::new() } else { format!(" The user's name is {name}.") };
+    let machines = config::machines();
+    let machines = if machines.is_empty() {
+        "No machines are registered for Wake-on-LAN (offer add_machine if asked to wake one).".to_string()
+    } else {
+        format!("Machines you can wake: {}.", machines.iter().map(|m| m.name.clone()).collect::<Vec<_>>().join(", "))
+    };
     format!(
-        "You are Optimimer, the personal assistant of ONE user, chatting over Telegram. Now: {now} ({tz}).\n\
+        "You are Optimimer, the personal assistant of ONE user, chatting over Telegram. Now: {now} ({tz}).{who}\n\
          You act through tools: tasks, notes and memos live as Markdown files in the user's Obsidian vault; money in a ledger; \
-         plus shopping lists, reminders, email, stock watches, and long-term memory. Task/note categories: {cats}.\n\
+         plus shopping lists, reminders, email, stock watches, machines, settings, and long-term memory. \
+         Task/note categories: {cats}. {machines}\n\
          Rules:\n\
          - Do things, don't describe how to. When the request is clear, call the tool(s) right away, several in one turn if needed. \
            Extract amounts, dates, names yourself; ask a question only when a required detail is genuinely missing.\n\

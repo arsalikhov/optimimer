@@ -140,7 +140,7 @@ impl Memory {
     // ---- graph ---------------------------------------------------------------
 
     /// Make sure every configured category exists as a node (with its hint as
-    /// the summary), so extraction resolves "SageMesh" to the category rather
+    /// the summary), so extraction resolves "Work" to the category rather
     /// than inventing a project of the same name.
     pub fn seed_categories(&self) {
         for (name, hint) in crate::vault::categories() {
@@ -409,8 +409,8 @@ pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, record
          kind is one of {}. Capture only what is worth remembering later: people (with role/relationship), organizations, projects, places, recurring topics, \
          the user's stated preferences (kind preference, name = short statement), durable facts about their life (kind fact, name = short statement), and dated events. \
          Summaries are one sentence, factual, in third person about the user (\"Alex is the user's dentist\"). Reuse plain canonical names (\"Sam\", not \"Sam (friend)\"). \
-         FIXED CATEGORIES already exist and must never be emitted as entities: {categories}. Refer to them by name in relations only (e.g. project X \"belongs to\" SageMesh). \
-         A project is narrower than a category (\"SageMesh prototype\" is a project under the SageMesh category; \"SageMesh\" itself is not a project). \
+         FIXED CATEGORIES already exist and must never be emitted as entities: {categories}. Refer to them by name in relations only (e.g. project X \"belongs to\" Work). \
+         A project is narrower than a category (\"Website redesign\" is a project under the Work category; \"Work\" itself is not a project). \
          Do NOT emit facts or events that merely restate something the assistant already recorded this turn (listed under RECORDED): the task/note/expense file is the record. \
          Skip greetings, transient chatter, and anything the assistant merely displayed (balances, lists). If nothing is worth keeping, output {{\"entities\":[],\"relations\":[]}}.",
         KINDS.join("|")
@@ -554,12 +554,12 @@ mod tests {
     fn categories_are_seeded_and_win() {
         let m = fresh();
         m.seed_categories();
-        let cat = m.by_name("SageMesh").expect("seeded");
+        let cat = m.by_name("Work").expect("seeded");
         assert_eq!(cat.kind, "category");
-        let again = m.upsert_node("project", "SageMesh", "", "");
-        assert_eq!(again.id, cat.id, "a 'project' called SageMesh is the category");
+        let again = m.upsert_node("project", "Work", "", "");
+        assert_eq!(again.id, cat.id, "a 'project' called Work is the category");
         assert_eq!(again.kind, "category");
-        let proto = m.upsert_node("project", "SageMesh prototype", "", "");
+        let proto = m.upsert_node("project", "Work prototype", "", "");
         assert_ne!(proto.id, cat.id);
     }
 

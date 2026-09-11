@@ -1,4 +1,4 @@
-//! Inline-button taps (`callback_query`): category answers, confirmations, forward-batch prompts, checklists.
+//! Inline-button taps (`callback_query`): onboarding steps, confirmations, forward-batch prompts, checklists.
 
 use super::*;
 
@@ -9,22 +9,10 @@ pub(super) async fn handle_callback(client: &reqwest::Client, api: &str, state: 
 
     let mut note = "OK".to_string();
 
-    // Sagemesh/Personal answer → re-run the stashed command with the category.
-    if let (Some(category), Some(chat)) = (data.strip_prefix("cat:"), chat_id) {
-        let pending = state.pending.lock().unwrap().remove(&chat);
-        if let Some(p) = pending {
-            note = format!("Category: {category}");
-            let reply = run_command(state, chat, &p.command, &p.text, category).await;
-            send(client, api, chat, &reply).await;
-        } else {
-            send(
-                client,
-                api,
-                chat,
-                &Reply::text("That prompt expired — send the command again."),
-            )
-            .await;
-        }
+    // Onboarding buttons (one-tap defaults: name, keep timezone/categories, skip machine).
+    if let (Some(rest), Some(chat)) = (data.strip_prefix("ob:"), chat_id) {
+        let reply = onboarding::callback(state, chat, rest);
+        send(client, api, chat, &reply).await;
     }
 
     // Confirm a destructive action the agent proposed (see `agent::confirm`).
@@ -45,6 +33,19 @@ pub(super) async fn handle_callback(client: &reqwest::Client, api: &str, state: 
             r if r.starts_with("remove_transaction:") => {
                 note = "Done".into();
                 remove_transaction_reply(&r["remove_transaction:".len()..])
+            }
+            "set_categories" => {
+                let pending = state.pending.lock().unwrap().remove(&chat);
+                match pending {
+                    Some(p) if p.command == "set_categories" => {
+                        note = "Done".into();
+                        crate::config::set(crate::config::CATEGORIES, &p.text);
+                        crate::memory::global().seed_categories();
+                        let names = crate::vault::categories().iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ");
+                        Reply::text(format!("Categories are now: {names}."))
+                    }
+                    _ => Reply::text("That confirmation expired — ask again."),
+                }
             }
             _ => Reply::text("That confirmation is no longer valid."),
         };

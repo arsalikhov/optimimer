@@ -307,13 +307,13 @@ pub fn list(sub: &str) -> Vec<Doc> {
 
 /// Default taxonomy. `category` is the coarse bucket every task and note gets;
 /// `project` is an optional finer label that lives under one category
-/// (Fitness → Triathlon, SageMesh → Launch). Override the names with
-/// `VAULT_CATEGORIES="Admin:chores and errands, Work:…"` (name:hint pairs).
+/// (Fitness → Triathlon, Work → Launch). The owner replaces the list during
+/// onboarding (stored as `config::CATEGORIES`) or with `VAULT_CATEGORIES=
+/// "Admin:chores and errands, Work:…"` (name:hint pairs, catch-all last).
 const DEFAULT_CATEGORIES: &[(&str, &str)] = &[
     ("Admin", "chores, errands, appointments (dentist, doctor, mechanic), bills, paperwork, calls to make"),
-    ("SageMesh", "anything about the SageMesh company or product"),
-    ("Aqusense", "anything about the Aqusense venture"),
-    ("Fitness", "training, workouts, races, gear (projects: Triathlon, Ironman)"),
+    ("Work", "your job, business or studies; projects nest under it"),
+    ("Fitness", "training, workouts, races, gear"),
     ("Home", "house, repairs, furniture, moving, groceries logistics"),
     ("Finance", "money admin, taxes, investments, subscriptions"),
     ("Learning", "courses, reading, study, skills"),
@@ -322,17 +322,43 @@ const DEFAULT_CATEGORIES: &[(&str, &str)] = &[
     ("Personal", "hobbies and anything that fits nowhere else"),
 ];
 
-/// (name, hint) pairs, from `VAULT_CATEGORIES` or the built-in list.
+/// Parse "Name: hint, Name: hint" (hint optional) into (name, hint) pairs.
+/// Entries are separated by ";" if present, else ","; a comma-separated piece
+/// without a ":" continues the previous hint unless it looks like a name
+/// (Capitalized, at most two words), so "Admin: chores, errands, Work: my job,
+/// Personal" yields three entries.
+pub fn parse_categories(s: &str) -> Vec<(String, String)> {
+    let sep = if s.contains(';') { ';' } else { ',' };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for item in s.split(sep) {
+        match item.split_once(':') {
+            Some((name, hint)) if !name.trim().is_empty() => out.push((name.trim().to_string(), hint.trim().to_string())),
+            _ => {
+                let piece = item.trim();
+                let looks_like_name = piece.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && piece.split_whitespace().count() <= 2;
+                if looks_like_name {
+                    out.push((piece.to_string(), String::new()));
+                } else if let Some(last) = out.last_mut() {
+                    if !piece.is_empty() {
+                        if !last.1.is_empty() {
+                            last.1.push_str(", ");
+                        }
+                        last.1.push_str(piece);
+                    }
+                } else if !piece.is_empty() {
+                    out.push((piece.to_string(), String::new()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// (name, hint) pairs from the configured list (env or settings), else the built-in one.
 pub fn categories() -> Vec<(String, String)> {
-    if let Ok(v) = std::env::var("VAULT_CATEGORIES") {
-        let parsed: Vec<(String, String)> = v
-            .split(',')
-            .filter_map(|item| {
-                let (name, hint) = item.split_once(':').unwrap_or((item, ""));
-                let name = name.trim();
-                (!name.is_empty()).then(|| (name.to_string(), hint.trim().to_string()))
-            })
-            .collect();
+    if let Some(v) = crate::config::get(crate::config::CATEGORIES) {
+        let parsed = parse_categories(&v);
         if !parsed.is_empty() {
             return parsed;
         }
@@ -341,7 +367,7 @@ pub fn categories() -> Vec<(String, String)> {
 }
 
 /// Snap a model-chosen category onto the configured list (case-insensitive,
-/// also accepts a prefix match like "sage" → "SageMesh"); falls back to the
+/// also accepts a prefix match like "fit" → "Fitness"); falls back to the
 /// last entry, which is the catch-all.
 pub fn clamp_category(c: &str) -> String {
     let cats = categories();
@@ -846,9 +872,19 @@ mod tests {
     }
 
     #[test]
+    fn categories_parse_with_commas_in_hints() {
+        let c = parse_categories("Admin: chores, errands, appointments, Work: my job, Personal");
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0], ("Admin".into(), "chores, errands, appointments".into()));
+        assert_eq!(c[1], ("Work".into(), "my job".into()));
+        assert_eq!(c[2], ("Personal".into(), "".into()));
+        assert_eq!(parse_categories("A: x; B: y, z").len(), 2);
+    }
+
+    #[test]
     fn category_clamping() {
         assert_eq!(clamp_category("admin"), "Admin");
-        assert_eq!(clamp_category("Sage"), "SageMesh");
+        assert_eq!(clamp_category("fit"), "Fitness");
         assert_eq!(clamp_category("chores"), "Personal", "unknown → catch-all");
         assert_eq!(clamp_category(""), "Personal");
     }

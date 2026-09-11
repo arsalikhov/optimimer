@@ -16,11 +16,11 @@ pub async fn transcribe(audio: Vec<u8>, format: &str) -> Result<String> {
         .unwrap_or_else(|_| "mistralai/voxtral-small-24b-2507".to_string());
 
     // Bias the model toward the user's domain vocabulary (names, brands, jargon)
-    // so an acronym or product name isn't misheard. Set TRANSCRIBE_VOCAB to a
-    // comma-separated list; extend it as new terms come up.
+    // so an acronym or product name isn't misheard. The list lives in settings
+    // (`config::VOCAB`, grown via the add_vocab tool) or TRANSCRIBE_VOCAB.
     let mut instruction =
         "Transcribe this audio verbatim. Output only the transcript text, nothing else.".to_string();
-    let vocab = std::env::var("TRANSCRIBE_VOCAB").unwrap_or_default();
+    let vocab = crate::config::vocab().join(", ");
     if !vocab.trim().is_empty() {
         instruction.push_str(&format!(
             " The speaker may use these specific names/brands/terms — prefer these exact spellings when a word matches them phonetically: {}.",

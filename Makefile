@@ -37,8 +37,11 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
+# --remap-path-prefix keeps your home directory and checkout path out of the
+# shipped binary's panic/debug strings (it's committed to deploy/bin).
 build-pi: ## Cross-compile the static aarch64 binary (needs cargo-zigbuild + zig)
-	cd backend && cargo zigbuild --release --target $(TRIPLE)
+	cd backend && RUSTFLAGS="--remap-path-prefix=$(HOME)=/home/build --remap-path-prefix=$(CURDIR)=/src $${RUSTFLAGS:-}" \
+	  cargo zigbuild --release --target $(TRIPLE)
 	cp $(BIN) $(PREBUILT)
 	@echo "Built $(PREBUILT)"
 
@@ -54,7 +57,7 @@ deploy: require-pi ## Ship to the Pi + run installer (add INFISICAL_ENV=dev to i
 	 $(SCP) "$$SRC" $(PI):$(REMOTE_DIR)/optimimer-backend.new; \
 	 $(SSH) $(PI) "chmod +x $(REMOTE_DIR)/optimimer-backend.new && mv -f $(REMOTE_DIR)/optimimer-backend.new $(REMOTE_DIR)/optimimer-backend"; \
 	 $(RSYNC) backend/agents/ $(PI):$(REMOTE_DIR)/agents/; \
-	 $(SCP) deploy/install.sh $(PI):$(REMOTE_DIR)/install.sh; \
+	 $(SCP) deploy/install.sh deploy/obsidian-sync.service $(PI):$(REMOTE_DIR)/; \
 	 if [ -n "$(INFISICAL_ENV)" ]; then \
 	   command -v infisical >/dev/null 2>&1 || { echo "infisical CLI not found locally — install it or omit INFISICAL_ENV"; exit 1; }; \
 	   echo "==> exporting secrets from local infisical (env=$(INFISICAL_ENV)) and injecting on the Pi"; \

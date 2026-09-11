@@ -1,4 +1,4 @@
-//! Per-chat preferences: timezone (`/tz`, location pins) and the one-time JSON → SQLite migration.
+//! Per-chat preferences: timezone (location pins, `set_timezone`) and the one-time JSON → SQLite migration.
 
 use super::*;
 
@@ -29,7 +29,7 @@ pub(super) fn finder() -> &'static tzf_rs::DefaultFinder {
 }
 
 pub(super) fn default_tz() -> String {
-    std::env::var("DEFAULT_TZ").unwrap_or_else(|_| "UTC".to_string())
+    crate::config::get(crate::config::TIMEZONE).unwrap_or_else(|| "UTC".to_string())
 }
 
 pub(super) fn tz_for(state: &BotState, chat_id: i64) -> String {

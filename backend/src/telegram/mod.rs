@@ -10,8 +10,13 @@
 //! → agent (or memo), receipt photo → OCR → ledger, CSV → import, forwarded
 //! messages → summary batch (`summaries.rs`), location pin → timezone.
 //!
+//! Access: a chat pairs by sending the setup code (owner) or an invite code
+//! (member) — see `crate::config` — and is then walked through `onboarding.rs`.
+//! `TELEGRAM_ALLOWED_CHAT_IDS` still works as a static allowlist.
+//!
 //! No-op (with a log line) when TELEGRAM_BOT_TOKEN is unset.
 
+use crate::config;
 use crate::convo;
 use crate::db::Db;
 use crate::engine;
@@ -33,6 +38,7 @@ mod machines;
 mod media;
 mod money;
 mod notes;
+mod onboarding;
 mod prefs;
 mod summaries;
 mod watch;
@@ -46,15 +52,15 @@ use machines::*;
 use media::*;
 use money::*;
 use notes::*;
+use onboarding::*;
 use prefs::*;
 use summaries::*;
 use watch::*;
 use workflows::*;
 pub use prefs::migrate_json;
 
-/// A chat's message awaiting a follow-up tap: either the Sagemesh/Personal
-/// category answer for `command`, or the original `text` of a message the router
-/// couldn't place and offered to salvage (then `command` is empty).
+/// A confirmation the agent proposed that carries a payload too big for a
+/// callback (e.g. `set_categories`): `command` names the action, `text` the data.
 #[derive(Clone)]
 struct Pending {
     command: String,
@@ -66,15 +72,20 @@ struct BotState {
     store: Store,
     pending: Arc<Mutex<HashMap<i64, Pending>>>,
     db: Db,
-    /// Chat ids permitted to use the bot. A public bot is discoverable, so every
-    /// inbound update is gated against this set (built from TELEGRAM_ALLOWED_CHAT_IDS).
-    /// Deny-by-default: an empty set rejects everyone.
+    /// Static allowlist from TELEGRAM_ALLOWED_CHAT_IDS, on top of the chats
+    /// paired in the database. Deny-by-default: unknown chats only get to pair.
     allowed: Arc<HashSet<i64>>,
 }
 
 impl BotState {
     fn is_allowed(&self, chat_id: i64) -> bool {
-        self.allowed.contains(&chat_id)
+        self.allowed.contains(&chat_id) || config::chat_role(chat_id).is_some()
+    }
+
+    /// The owner: the chat that paired with the setup code — or, before anyone
+    /// has, any env-allowlisted chat (single-user installs from before pairing).
+    fn is_owner(&self, chat_id: i64) -> bool {
+        config::is_owner(chat_id) || (config::owner_chat().is_none() && self.allowed.contains(&chat_id))
     }
 }
 
@@ -116,22 +127,21 @@ pub async fn run_bot(store: Store, db: Db) {
         }
     };
 
-    // Allowlist of chat ids that may use the bot. Telegram bots are publicly
-    // discoverable, so without this anyone could drive the vault/list commands.
-    // Deny-by-default: if the var is unset/empty we reject everyone and log each
-    // caller's chat_id so the owner can find their own and add it.
+    // Telegram bots are publicly discoverable, so access is deny-by-default:
+    // a chat is in if it paired (setup/invite code → `chats` table) or is in
+    // the optional static allowlist.
     let allowed: HashSet<i64> = std::env::var("TELEGRAM_ALLOWED_CHAT_IDS")
         .unwrap_or_default()
         .split(',')
         .filter_map(|s| s.trim().parse::<i64>().ok())
         .collect();
-    if allowed.is_empty() {
-        tracing::warn!(
-            "TELEGRAM_ALLOWED_CHAT_IDS is empty — all chats are DENIED. Message the bot, \
-             find your chat_id in the 'unauthorized chat' log line below, then set the var."
-        );
-    } else {
-        tracing::info!("Telegram allowlist: {} chat id(s) authorized", allowed.len());
+    match config::setup_code() {
+        Some(code) => tracing::info!("No owner paired yet. Open Telegram, message the bot and send the setup code: {code}"),
+        None => tracing::info!(
+            "Telegram access: {} paired chat(s), {} from TELEGRAM_ALLOWED_CHAT_IDS",
+            config::chats().len(),
+            allowed.len()
+        ),
     }
 
     let api = format!("https://api.telegram.org/bot{token}");
@@ -185,11 +195,34 @@ pub async fn run_bot(store: Store, db: Db) {
                 None => continue,
             };
 
-            // Authorization gate. Reject anyone not on the allowlist before any
-            // command runs, and log their chat_id so the owner can allowlist it.
+            // Authorization gate. An unknown chat's only move is to pair: the
+            // setup code makes it the owner, an invite code a member. Anything
+            // else is refused (and logged, so the owner can spot strangers).
             if !state.is_allowed(chat_id) {
-                tracing::warn!("unauthorized chat {chat_id} — denied (add to TELEGRAM_ALLOWED_CHAT_IDS)");
-                send(&client, &api, chat_id, &Reply::text("Not authorized.")).await;
+                let text = msg["text"].as_str().unwrap_or("").trim();
+                let first_name = msg["from"]["first_name"].as_str().unwrap_or("");
+                match config::try_pair(chat_id, text, first_name) {
+                    Some(role) => {
+                        tracing::info!("chat {chat_id} paired as {role}");
+                        let owner = role == config::ROLE_OWNER;
+                        send(&client, &api, chat_id, &onboarding::start(chat_id, owner, first_name)).await;
+                    }
+                    None => {
+                        tracing::warn!("unauthorized chat {chat_id} — denied (needs the setup or an invite code)");
+                        send(&client, &api, chat_id, &Reply::text(
+                            "This assistant is private. If it's yours, send the setup code the installer printed \
+                             (it's also in the server log); otherwise ask the owner for an invite code.",
+                        )).await;
+                    }
+                }
+                continue;
+            }
+
+            // While setup is running it owns every message (text, pins, buttons).
+            if onboarding::active(chat_id) {
+                if let Some(reply) = onboarding::step(&state, chat_id, msg) {
+                    send(&client, &api, chat_id, &reply).await;
+                }
                 continue;
             }
 

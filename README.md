@@ -55,15 +55,25 @@ bun run dev:secure                                       # = infisical run --env
 `backend/.env.example` is the reference list of every key the app understands.
 
 The core keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, and `VAULT_DIR` (where the Markdown files go).
+Everything personal — your name, timezone, categories, machines, who may talk to the bot — is **not** configured
+here: it is collected by the bot itself during setup and stored in its SQLite database, so the source and the
+shipped binary contain nothing about you.
 
 ### Security — who can use the bot
 
-A Telegram bot is publicly discoverable, so the bot is **deny-by-default**: only chat ids in
-`TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) may use it; everyone else is refused. On first run leave it unset,
-message the bot once, and read the `unauthorized chat <id>` line in the logs to find your own id — then set the
-var. The HTTP API also binds to `127.0.0.1` by default (override with `OPTIMIMER_BIND`), so it isn't exposed on
-your LAN; reach the web UI over an SSH tunnel if you need it remotely. Transport to Telegram is TLS, but bot chats
-are not end-to-end encrypted (Telegram's servers see message content — inherent to the Bot API).
+A Telegram bot is publicly discoverable, so the bot is **deny-by-default** and access works by **pairing**:
+
+1. On start (or from `deploy/install.sh`) the bot prints a one-time **setup code** like `K7QD-3MXP` (set your own
+   with `OPTIMIMER_SETUP_CODE`, or let it generate one).
+2. Send that code to the bot from Telegram. That chat becomes the **owner**, and the bot walks you through setup
+   (name, timezone, categories, an optional machine to wake). Everything else is refused with a short hint.
+3. To let someone else in, tell the bot "invite someone": it mints a one-time **invite code**; the newcomer sends it
+   and is paired as a member (their own name and timezone, but the owner's categories). "Remove <name>" revokes.
+
+Paired chats live in the `chats` table; `TELEGRAM_ALLOWED_CHAT_IDS` still works as a static allowlist for old
+installs. The HTTP API binds to `127.0.0.1` by default (override with `OPTIMIMER_BIND`), so it isn't exposed on your
+LAN; reach the web UI over an SSH tunnel if you need it remotely. Transport to Telegram is TLS, but bot chats are not
+end-to-end encrypted (Telegram's servers see message content — inherent to the Bot API).
 
 Finance commands write to a `transactions` table in the SQLite db; `RENT_AMOUNTS` (comma-separated exact amounts,
 off by default) enables the rent-detection rule. See `backend/.env.example` for every key the app understands.
@@ -78,15 +88,16 @@ so Obsidian **Bases** can filter, sort and group them — "open tasks by project
 plugins. Completing a task flips its `status` to `done`; listing and searching read the same files, so edits you
 make in Obsidian are what the bot sees. There is no cloud dependency: the bot only ever touches local files.
 
-Every task and note carries a **`category`** from a fixed list (default: Admin, SageMesh, Aqusense, Fitness, Home,
-Finance, Learning, Social, Travel, Personal; override with `VAULT_CATEGORIES`) and an optional **`project`** nested
-under it (Fitness → Triathlon). The parsers pick both; the bases group by category and the Gantt uses categories as
-sections with the project as a prefix.
+Every task and note carries a **`category`** from a fixed list (default: Admin, Work, Fitness, Home, Finance,
+Learning, Social, Travel, Personal; you choose your own during setup, or override with `VAULT_CATEGORIES`) and an
+optional **`project`** nested under it (Fitness → Triathlon). The parsers pick both and may create projects but never
+categories; the bases group by category and the Gantt uses categories as sections with the project as a prefix.
 
 To get the vault onto your other devices without running the desktop app on the Pi, use **Obsidian Headless**
 (`npm install -g obsidian-headless`, needs Node 22+): `ob login`, `ob sync-setup --vault "<remote vault>" --path
-/opt/optimimer/vault`, then run `ob sync --continuous` as a service — `deploy/obsidian-sync.service` is a ready unit.
-It uses your Obsidian Sync subscription and the same end-to-end encryption as the app.
+/opt/optimimer/vault`, then run `ob sync --continuous` as a service — `deploy/obsidian-sync.service` is a template
+unit that the installer offers to fill in and enable for you. It uses your Obsidian Sync subscription and the same
+end-to-end encryption as the app.
 
 **Finances in Obsidian.** Every ledger row is mirrored as a small note in `finance/` (`type: transaction`, `date`,
 `amount`, `direction`, `category`, `source`, `flagged`), and the bot drops a `Finances.base` into the vault root on
@@ -148,9 +159,9 @@ make deploy PI=pi@<your-pi-ip>
 
 That cross-compiles a fresh binary if you have a Rust toolchain (otherwise it ships the prebuilt one),
 copies it plus `agents/` to `/opt/optimimer`, then runs an **interactive installer over SSH** that asks for
-your **timezone, Telegram bot token, and OpenRouter API key** (vault folder and category labels optional),
-writes a private `optimimer.env` (chmod 600), and installs a systemd service that auto-starts on boot and
-restarts on crash. The bot is long-polling, so **no ports are opened** on the Pi.
+your **timezone, Telegram bot token, and OpenRouter API key**, writes a private `optimimer.env` (chmod 600),
+installs a systemd service that auto-starts on boot and restarts on crash, and finally prints the **setup code**
+to send to your bot. The bot is long-polling, so **no ports are opened** on the Pi.
 
 To cross-compile a fresh binary yourself you need the toolchain once on an x86_64 dev machine:
 
@@ -170,10 +181,9 @@ Other Makefile targets: `make logs PI=…` (follow logs), `make restart PI=…`,
 `make uninstall PI=…`. To re-run just the secret prompts later:
 `ssh -t pi@<ip> /opt/optimimer/install.sh`.
 
-**Secrets without typing them.** The installer auto-detects any of `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_ALLOWED_CHAT_IDS`, `OPENROUTER_API_KEY`, `DEFAULT_TZ`, `CATEGORY_A`, `CATEGORY_B`, `VAULT_DIR`,
-`RENT_AMOUNTS` already present in its environment and skips
-prompting for those. Two ways to feed them:
+**Secrets without typing them.** The installer auto-detects any of `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`,
+`DEFAULT_TZ`, `VAULT_DIR`, `OPTIMIMER_SETUP_CODE`, `TELEGRAM_ALLOWED_CHAT_IDS`, `RENT_AMOUNTS` already present in
+its environment and skips prompting for those. Two ways to feed them:
 
 - **From your laptop's Infisical (the Pi needs no infisical CLI):** pass `INFISICAL_ENV` and `make` exports
   the secrets locally and injects them into the remote installer:
@@ -199,15 +209,18 @@ wins.
 ## Telegram (primary interface)
 
 1. Create a bot with [@BotFather](https://t.me/BotFather), copy the token into `backend/.env`.
-2. Add your chat id to `TELEGRAM_ALLOWED_CHAT_IDS` (see [Security](#security--who-can-use-the-bot)) — the bot
-   refuses everyone else.
-3. Restart the backend. You'll see `Telegram bot started (long polling)`.
+2. Start the backend. The log shows `Telegram bot started (long polling)` and, above it, your one-time setup code.
+3. Message the bot and send the code. You're paired as the owner and the bot asks for your name, timezone,
+   categories and (optionally) a machine to wake — each with a one-tap default. See
+   [Security](#security--who-can-use-the-bot) for inviting others.
 
 **Just talk to it.** There are no slash commands. Every message (typed or spoken) goes to one tool-calling model
 (`AGENT_MODEL`, default Claude Sonnet 4.6) that acts through tools: create or complete tasks, save notes and memos,
-log money and show balances, manage shopping lists, set reminders, send email, watch stock, wake a machine, set your
-timezone. Anything that shows a table or list (balance, transactions, task lists, search results) is displayed
-directly as a rich message; destructive actions (clearing a list, deleting a transaction) get Yes/Cancel buttons.
+log money and show balances, manage shopping lists, set reminders, send email, watch stock, wake a machine, and
+change its own settings (your name, timezone, categories, machines, voice vocabulary, invites — "show settings"
+lists them, "run setup again" repeats the onboarding). Anything that shows a table or list (balance, transactions,
+task lists, search results) is displayed directly as a rich message; destructive actions (clearing a list, deleting a
+transaction) get Yes/Cancel buttons.
 
 **It remembers.** Every turn is stored, but the model only sees the last `MEMORY_WINDOW` turns plus a rolling summary
 of everything older, so context never bloats. After each exchange a cheap model (`MEMORY_MODEL`) extracts people,

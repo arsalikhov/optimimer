@@ -68,6 +68,17 @@ fn init_schema(conn: &Connection) -> Result<()> {
              chat_id INTEGER PRIMARY KEY,
              tz      TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS settings (
+             key     TEXT PRIMARY KEY,
+             value   TEXT NOT NULL,
+             updated TEXT NOT NULL DEFAULT ''
+         );
+         CREATE TABLE IF NOT EXISTS chats (
+             chat_id INTEGER PRIMARY KEY,
+             role    TEXT NOT NULL,
+             name    TEXT NOT NULL DEFAULT '',
+             joined  TEXT NOT NULL DEFAULT ''
+         );
          CREATE TABLE IF NOT EXISTS chat_lists (
              chat_id INTEGER PRIMARY KEY,
              json    TEXT NOT NULL

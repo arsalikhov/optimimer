@@ -1,5 +1,6 @@
 mod cache;
 mod charts;
+mod config;
 mod datetime;
 mod db;
 mod engine;
@@ -56,6 +57,9 @@ async fn main() {
 
     // Transactions ledger (/spent, /earned, /balance, CSV import) — SQLite.
     finance::init(db.clone());
+
+    // Instance settings (owner profile, categories, machines, paired chats).
+    config::init(db.clone());
 
     // Conversation history + knowledge graph the agent recalls from.
     memory::init(db.clone());
