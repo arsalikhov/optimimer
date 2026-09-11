@@ -65,10 +65,10 @@ echo
 WRAP_INFISICAL=n
 INFISICAL_ENV=prod
 if command -v infisical >/dev/null 2>&1; then
-  read -r -p "infisical CLI found. Inject secrets at RUNTIME via 'infisical run' (nothing on disk)? [y/N] " a
+  read -r -p "infisical CLI found. Inject secrets at RUNTIME via 'infisical run' (nothing on disk)? [y/N] " a </dev/tty
   if [[ "${a:-}" =~ ^[Yy] ]]; then
     WRAP_INFISICAL=y
-    read -r -p "  Infisical environment slug [prod]: " INFISICAL_ENV; INFISICAL_ENV="${INFISICAL_ENV:-prod}"
+    read -r -p "  Infisical environment slug [prod]: " INFISICAL_ENV </dev/tty; INFISICAL_ENV="${INFISICAL_ENV:-prod}"
   fi
 fi
 
@@ -93,7 +93,7 @@ gen_code() {
 # ---- gather config -----------------------------------------------------------
 reuse=n
 if [ -f "$ENV_FILE" ] && [ "$WRAP_INFISICAL" = n ] && [ "$detected" = 0 ]; then
-  read -r -p "$ENV_FILE exists. Reuse it as-is? [Y/n] " reuse; reuse="${reuse:-Y}"
+  read -r -p "$ENV_FILE exists. Reuse it as-is? [Y/n] " reuse </dev/tty; reuse="${reuse:-Y}"
 fi
 
 SETUP_CODE="${OPTIMIMER_SETUP_CODE:-$(gen_code)}"
@@ -187,7 +187,7 @@ sudo systemctl --no-pager status "$APP" | head -10 || true
 # If `ob` (obsidian-headless) is installed and logged in, offer to run the vault
 # sync as a service for this user. Template: deploy/obsidian-sync.service.
 if command -v ob >/dev/null 2>&1 && [ -f "$DIR/obsidian-sync.service" ] && [ ! -f /etc/systemd/system/obsidian-sync.service ]; then
-  read -r -p "obsidian-headless found. Install the vault sync service for $RUN_USER? [y/N] " a
+  read -r -p "obsidian-headless found. Install the vault sync service for $RUN_USER? [y/N] " a </dev/tty
   if [[ "${a:-}" =~ ^[Yy] ]]; then
     sed "s|@USER@|$RUN_USER|g; s|@HOME@|$HOME|g; s|@VAULT@|${VAULT_DIR:-$DIR/vault}|g; s|@OB@|$(command -v ob)|g" \
       "$DIR/obsidian-sync.service" | sudo tee /etc/systemd/system/obsidian-sync.service >/dev/null
