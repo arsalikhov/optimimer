@@ -78,7 +78,7 @@ so Obsidian **Bases** can filter, sort and group them — "open tasks by project
 plugins. Completing a task flips its `status` to `done`; listing and searching read the same files, so edits you
 make in Obsidian are what the bot sees. There is no cloud dependency: the bot only ever touches local files.
 
-Every task and note carries a **`category`** from a fixed list (default: Admin, SageMesh, AquSense, Fitness, Home,
+Every task and note carries a **`category`** from a fixed list (default: Admin, SageMesh, Aqusense, Fitness, Home,
 Finance, Learning, Social, Travel, Personal; override with `VAULT_CATEGORIES`) and an optional **`project`** nested
 under it (Fitness → Triathlon). The parsers pick both; the bases group by category and the Gantt uses categories as
 sections with the project as a prefix.

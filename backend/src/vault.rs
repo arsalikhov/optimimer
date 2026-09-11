@@ -312,7 +312,7 @@ pub fn list(sub: &str) -> Vec<Doc> {
 const DEFAULT_CATEGORIES: &[(&str, &str)] = &[
     ("Admin", "chores, errands, appointments (dentist, doctor, mechanic), bills, paperwork, calls to make"),
     ("SageMesh", "anything about the SageMesh company or product"),
-    ("AquSense", "anything about the AquSense venture"),
+    ("Aqusense", "anything about the Aqusense venture"),
     ("Fitness", "training, workouts, races, gear (projects: Triathlon, Ironman)"),
     ("Home", "house, repairs, furniture, moving, groceries logistics"),
     ("Finance", "money admin, taxes, investments, subscriptions"),
