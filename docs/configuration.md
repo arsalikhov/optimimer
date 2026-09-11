@@ -2,8 +2,9 @@
 
 Two layers:
 
-- **Environment variables** — from `/opt/optimimer/optimimer.env` (written by the installer), a `backend/.env`
-  file in development, or an injected environment (Infisical). Secrets and machine-level paths live here.
+- **Environment variables** — from `/etc/optimimer/optimimer.env` (package install) or `/opt/optimimer/optimimer.env`
+  (clone install), both written by `optimimer-setup`; a `backend/.env` file in development; or whatever your
+  secret manager exports. Secrets and machine-level paths live here. **Only two are required.**
 - **Stored settings** — chosen during onboarding or by talking to the bot, kept in the `settings` table of the
   SQLite database. Personal preferences live here.
 

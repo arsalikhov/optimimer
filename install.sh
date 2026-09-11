@@ -9,6 +9,9 @@
 # (timezone, Telegram bot token, OpenRouter API key) and prints the setup code
 # you send to your bot to pair. Re-run after `git pull` to update.
 #
+# Prefer the .deb package if you are on Raspberry Pi OS / Debian / Ubuntu:
+# see https://github.com/arsalikhov/optimimer/releases
+#
 # Not on 64-bit ARM? With a Rust toolchain installed the script builds from
 # source instead (slow on a Pi, fine on a laptop or server).
 #
@@ -24,7 +27,7 @@ RUN_SETUP=y
 for t in sudo install; do
   command -v "$t" >/dev/null 2>&1 || { echo "Missing '$t' — install it and re-run." >&2; exit 1; }
 done
-[ -f "$SRC/deploy/install.sh" ] || { echo "Run this from a checkout of the repository (deploy/install.sh not found)." >&2; exit 1; }
+[ -f "$SRC/deploy/optimimer-setup" ] || { echo "Run this from a checkout of the repository (deploy/optimimer-setup not found)." >&2; exit 1; }
 
 # ---- pick a binary: prebuilt for aarch64, otherwise build from source --------
 BIN=""
@@ -48,7 +51,7 @@ sudo chown "$(id -un):$(id -gn)" "$DIR" "$DIR/agents"
 install -m 755 "$BIN" "$DIR/optimimer-backend.new"
 mv -f "$DIR/optimimer-backend.new" "$DIR/optimimer-backend"
 install -m 644 "$SRC/backend/agents/"*.json "$DIR/agents/"
-install -m 755 "$SRC/deploy/install.sh" "$DIR/install.sh"
+install -m 755 "$SRC/deploy/optimimer-setup" "$DIR/optimimer-setup"
 install -m 644 "$SRC/deploy/obsidian-sync.service" "$DIR/obsidian-sync.service"
 
 # Wake-on-LAN needs etherwake; skipped quietly when the package manager isn't apt.
@@ -58,9 +61,9 @@ if command -v apt-get >/dev/null 2>&1 && ! command -v etherwake >/dev/null 2>&1;
 fi
 
 if [ "$RUN_SETUP" = n ]; then
-  echo "Files installed. Run $DIR/install.sh to set up the service."
+  echo "Files installed. Run $DIR/optimimer-setup to set up the service."
   exit 0
 fi
 
 # Hand over to the interactive setup with a real terminal.
-exec "$DIR/install.sh" </dev/tty
+exec "$DIR/optimimer-setup" </dev/tty

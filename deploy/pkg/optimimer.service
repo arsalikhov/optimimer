@@ -1,0 +1,28 @@
+[Unit]
+Description=Optimimer backend (Telegram bot + scheduler)
+Documentation=https://github.com/arsalikhov/optimimer
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/optimimer/optimimer.env
+
+[Service]
+Type=simple
+User=optimimer
+Group=optimimer
+WorkingDirectory=/var/lib/optimimer
+EnvironmentFile=/etc/optimimer/optimimer.env
+Environment=OPTIMIMER_DB=/var/lib/optimimer/optimimer.db
+Environment=OPTIMIMER_AGENTS_DIR=/usr/share/optimimer/agents
+Environment=VAULT_DIR=/var/lib/optimimer/vault
+ExecStart=/usr/bin/optimimer-backend
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/optimimer
+# Raw-socket capability for Wake-on-LAN (etherwake), inherited by children; no sudo needed.
+AmbientCapabilities=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

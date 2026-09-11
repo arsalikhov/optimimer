@@ -10,17 +10,19 @@ and one SQLite file on the Pi. Nothing about you is in this repository or the bi
 
 ## Install
 
-On a 64-bit Raspberry Pi, with a bot token from [@BotFather](https://t.me/BotFather) and an
-[OpenRouter](https://openrouter.ai) key at hand:
+Prebuilt for Raspberry Pi and Debian (`.deb`), Arch (`PKGBUILD`), Docker, macOS and Windows — no toolchain needed.
+On a Pi, with a bot token from [@BotFather](https://t.me/BotFather) and an [OpenRouter](https://openrouter.ai) key
+at hand:
 
 ```sh
-git clone https://github.com/arsalikhov/optimimer.git
-cd optimimer && ./install.sh
+curl -LO https://github.com/arsalikhov/optimimer/releases/latest/download/optimimer-arm64.deb
+sudo apt install ./optimimer-arm64.deb
+sudo optimimer-setup
 ```
 
-It asks three questions (timezone, bot token, API key), installs a systemd service, and prints a **setup code**.
+Setup asks three questions (timezone, bot token, API key), starts a systemd service, and prints a **setup code**.
 Send that code to your bot from Telegram: you are paired as the owner and the bot asks your name, timezone and
-categories. No ports are opened; the bot long-polls Telegram.
+categories. No ports are opened; the bot long-polls Telegram. Other platforms: [Install](docs/install.md).
 
 Then just talk to it: "remind me to call the dentist tomorrow at 9", "spent 12.50 on lunch", "note: ideas for the
 trip", or forward a conversation and get a summary.

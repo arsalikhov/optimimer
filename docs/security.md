@@ -28,9 +28,9 @@ Paired chats live in the `chats` table of the SQLite database; delete a row to r
 
 ## Secrets on disk
 
-`optimimer.env` is mode 600 and holds the bot token and API key. If you would rather keep nothing on disk, run the
-service through `infisical run` (the installer offers this when the CLI is present). Environment variables always
-win over stored settings, so an injected secret is what runs.
+`optimimer.env` holds the bot token and API key, readable only by root and the service user. Nothing requires a
+secret manager; if you use one, have it export the variables before `optimimer-setup` (which then asks nothing) or
+add a systemd drop-in that injects them. Environment variables always win over the file and over stored settings.
 
 ## What is personal, and where it lives
 

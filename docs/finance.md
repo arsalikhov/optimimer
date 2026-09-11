@@ -32,8 +32,3 @@ flagged duplicates; `Charts.md` and the Sankey on `Home.md` are regenerated afte
 
 Set `FINANCE_PLACEHOLDERS=1` to seed an empty ledger with labelled sample rows (source `Placeholder`) for the last
 three months so every view renders. They vanish the moment a real expense, receipt or CSV row arrives.
-
-## Migrating from Notion
-
-Earlier versions stored everything in Notion. `scripts/notion_export.py` (standard library only) dumps every
-database to JSON plus one Markdown file per page for archiving; nothing is imported into the vault.

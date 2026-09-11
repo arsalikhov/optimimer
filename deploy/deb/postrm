@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$1" = purge ]; then
+  rm -rf /etc/optimimer
+  echo "Purged /etc/optimimer. Your data (database + vault) is still in /var/lib/optimimer — remove it yourself if you want it gone."
+fi
+exit 0

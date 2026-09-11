@@ -1,0 +1,2 @@
+# systemd-sysusers: service account for the optimimer package (Arch, tarball installs)
+u optimimer - "Optimimer assistant" /var/lib/optimimer /usr/bin/nologin

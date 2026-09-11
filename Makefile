@@ -57,15 +57,15 @@ deploy: require-pi ## Ship to the Pi + run installer (add INFISICAL_ENV=dev to i
 	 $(SCP) "$$SRC" $(PI):$(REMOTE_DIR)/optimimer-backend.new; \
 	 $(SSH) $(PI) "chmod +x $(REMOTE_DIR)/optimimer-backend.new && mv -f $(REMOTE_DIR)/optimimer-backend.new $(REMOTE_DIR)/optimimer-backend"; \
 	 $(RSYNC) backend/agents/ $(PI):$(REMOTE_DIR)/agents/; \
-	 $(SCP) deploy/install.sh deploy/obsidian-sync.service $(PI):$(REMOTE_DIR)/; \
+	 $(SCP) deploy/optimimer-setup deploy/obsidian-sync.service $(PI):$(REMOTE_DIR)/; \
 	 if [ -n "$(INFISICAL_ENV)" ]; then \
 	   command -v infisical >/dev/null 2>&1 || { echo "infisical CLI not found locally — install it or omit INFISICAL_ENV"; exit 1; }; \
 	   echo "==> exporting secrets from local infisical (env=$(INFISICAL_ENV)) and injecting on the Pi"; \
 	   umask 077; infisical export --env=$(INFISICAL_ENV) --format=dotenv > .opti.env.tmp; \
 	   $(SCP) .opti.env.tmp $(PI):/tmp/opti.env; rm -f .opti.env.tmp; \
-	   $(SSH) -t $(PI) "set -a; . /tmp/opti.env; set +a; rm -f /tmp/opti.env; chmod +x $(REMOTE_DIR)/install.sh; $(REMOTE_DIR)/install.sh"; \
+	   $(SSH) -t $(PI) "set -a; . /tmp/opti.env; set +a; rm -f /tmp/opti.env; chmod +x $(REMOTE_DIR)/optimimer-setup; $(REMOTE_DIR)/optimimer-setup"; \
 	 else \
-	   $(SSH) -t $(PI) "chmod +x $(REMOTE_DIR)/install.sh && $(REMOTE_DIR)/install.sh"; \
+	   $(SSH) -t $(PI) "chmod +x $(REMOTE_DIR)/optimimer-setup && $(REMOTE_DIR)/optimimer-setup"; \
 	 fi
 
 redeploy: require-pi ## Ship binary+agents + restart — reuses existing config, NO installer/prompts

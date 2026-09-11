@@ -1,0 +1,4 @@
+# systemd-tmpfiles: data and config directories for the optimimer package
+d /var/lib/optimimer       0750 optimimer optimimer -
+d /var/lib/optimimer/vault 0750 optimimer optimimer -
+d /etc/optimimer           0750 root      optimimer -

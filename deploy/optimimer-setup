@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Optimimer setup — run once after installing, and again whenever you want to
+# change a secret or the timezone:
+#
+#   sudo optimimer-setup             # installed from the .deb package
+#   /opt/optimimer/optimimer-setup   # installed from a git clone (./install.sh)
+#
+# Asks three things — timezone, Telegram bot token, OpenRouter API key — writes
+# the env file, enables the systemd service and prints the SETUP CODE you send
+# to your bot from Telegram to pair as its owner. Everything else (your name,
+# categories, machines…) is configured by talking to the bot.
+#
+# Any of these already present in the environment is used without prompting, so
+# a secret manager that exports variables (e.g. `infisical run -- optimimer-setup`)
+# just works: TELEGRAM_BOT_TOKEN OPENROUTER_API_KEY DEFAULT_TZ VAULT_DIR
+# OPTIMIMER_SETUP_CODE TELEGRAM_ALLOWED_CHAT_IDS RENT_AMOUNTS RESEND_API_KEY EMAIL_FROM
+#
+# The bot long-polls Telegram, so no inbound ports are opened.
+set -euo pipefail
+
+APP=optimimer
+
+# ---- layout: .deb package (FHS paths, system user) or git clone (/opt) --------
+if [ "${OPTIMIMER_LAYOUT:-}" != clone ] && [ -x /usr/bin/optimimer-backend ] && [ -d /usr/share/optimimer ]; then
+  LAYOUT=package
+  BIN=/usr/bin/optimimer-backend
+  DATA_DIR=/var/lib/optimimer
+  ENV_FILE=/etc/optimimer/optimimer.env
+  SYNC_TEMPLATE=/usr/share/optimimer/obsidian-sync.service
+  RUN_USER=optimimer
+  if [ "$(id -u)" != 0 ]; then echo "Run as root:  sudo optimimer-setup" >&2; exit 1; fi
+  SUDO=""
+else
+  LAYOUT=clone
+  DIR="${OPTIMIMER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+  BIN="$DIR/optimimer-backend"
+  DATA_DIR="$DIR"
+  ENV_FILE="$DIR/optimimer.env"
+  SYNC_TEMPLATE="$DIR/obsidian-sync.service"
+  RUN_USER="$(id -un)"
+  SUDO=sudo
+fi
+SERVICE=/etc/systemd/system/$APP.service
+
+echo
+echo "=== Optimimer setup ($LAYOUT install) ==="
+echo "binary:       $BIN"
+echo "data dir:     $DATA_DIR"
+echo "env file:     $ENV_FILE"
+echo "service user: $RUN_USER"
+echo
+
+[ -x "$BIN" ] || { echo "!! $BIN not found or not executable." >&2; exit 1; }
+
+# ---- keep non-secret answers from a previous run --------------------------------
+if [ -f "$ENV_FILE" ]; then
+  for v in DEFAULT_TZ VAULT_DIR OPTIMIMER_SETUP_CODE; do
+    if [ -z "${!v:-}" ]; then
+      prev="$(sed -n "s/^$v=//p" "$ENV_FILE" | tail -1)"
+      [ -n "$prev" ] && export "$v=$prev"
+    fi
+  done
+fi
+
+detected=0
+for v in TELEGRAM_BOT_TOKEN OPENROUTER_API_KEY DEFAULT_TZ VAULT_DIR OPTIMIMER_SETUP_CODE \
+         TELEGRAM_ALLOWED_CHAT_IDS RENT_AMOUNTS RESEND_API_KEY EMAIL_FROM; do
+  if [ -n "${!v:-}" ]; then echo "  ✓ $v found in the environment — not asking"; detected=1; fi
+done
+echo
+
+# `ask` is visible, `asks` hidden; both use a value already in the environment.
+ask() {
+  local var="$1" label="$2" def="${3:-}"
+  if [ -n "${!var:-}" ]; then printf '%s' "${!var}"; return; fi
+  local val; read -r -p "  $label${def:+ [$def]}: " val </dev/tty; printf '%s' "${val:-$def}"
+}
+asks() {
+  local var="$1" label="$2"
+  if [ -n "${!var:-}" ]; then printf '%s' "${!var}"; return; fi
+  local val; read -rs -p "  $label (blank to skip): " val </dev/tty; echo >&2; printf '%s' "$val"
+}
+# A short pairing code without look-alike characters (no 0/O/1/I), e.g. K7QD-3MXP.
+gen_code() {
+  local raw; raw="$(LC_ALL=C tr -dc 'A-HJ-NP-Z2-9' </dev/urandom | head -c 8)"
+  printf '%s-%s' "${raw:0:4}" "${raw:4:4}"
+}
+
+# ---- gather --------------------------------------------------------------------
+reuse=n
+if [ -f "$ENV_FILE" ] && [ "$detected" = 0 ]; then
+  read -r -p "$ENV_FILE exists. Keep it as-is? [Y/n] " reuse </dev/tty; reuse="${reuse:-Y}"
+fi
+SETUP_CODE="${OPTIMIMER_SETUP_CODE:-$(gen_code)}"
+
+if [[ ! "$reuse" =~ ^[Yy] ]]; then
+  TZ_IN="$(ask DEFAULT_TZ 'Your timezone (IANA, e.g. Europe/London)' UTC)"
+  TG="$(asks TELEGRAM_BOT_TOKEN 'Telegram bot token (from @BotFather)')"
+  OR="$(asks OPENROUTER_API_KEY 'OpenRouter API key')"
+  [ -n "$SETUP_CODE" ] || SETUP_CODE="$(gen_code)"
+
+  umask 077
+  $SUDO mkdir -p "$(dirname "$ENV_FILE")"
+  $SUDO tee "$ENV_FILE" >/dev/null <<EOF2
+# Written by optimimer-setup — keep private. Re-run optimimer-setup to change.
+DEFAULT_TZ=$TZ_IN
+TELEGRAM_BOT_TOKEN=$TG
+OPENROUTER_API_KEY=$OR
+# One-time pairing code: send it to the bot from Telegram to become its owner.
+# The bot then walks you through the rest (name, timezone, categories, machines).
+OPTIMIMER_SETUP_CODE=$SETUP_CODE
+# Markdown vault — tasks, notes and summaries are written here as .md files.
+# Point it at the folder Obsidian syncs so they show up on every device.
+VAULT_DIR=${VAULT_DIR:-$DATA_DIR/vault}
+# Optional: static allowlist of Telegram chat ids on top of pairing.
+TELEGRAM_ALLOWED_CHAT_IDS=${TELEGRAM_ALLOWED_CHAT_IDS:-}
+# Optional: exact e-transfer amounts treated as rent (comma-separated).
+RENT_AMOUNTS=${RENT_AMOUNTS:-}
+# Optional: email sending via Resend.
+RESEND_API_KEY=${RESEND_API_KEY:-}
+EMAIL_FROM=${EMAIL_FROM:-}
+EOF2
+  if [ "$LAYOUT" = package ]; then
+    chown root:optimimer "$ENV_FILE"; chmod 640 "$ENV_FILE"
+  else
+    chmod 600 "$ENV_FILE"
+  fi
+  echo "Wrote $ENV_FILE."
+fi
+
+# ---- systemd unit (the .deb ships its own) ----------------------------------------
+if [ "$LAYOUT" = clone ]; then
+  echo "Installing systemd service ($SERVICE)…"
+  $SUDO tee "$SERVICE" >/dev/null <<EOF2
+[Unit]
+Description=Optimimer backend (Telegram bot + scheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$RUN_USER
+WorkingDirectory=$DATA_DIR
+EnvironmentFile=-$ENV_FILE
+ExecStart=$BIN
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+# Raw-socket capability for Wake-on-LAN (etherwake), inherited by children; no sudo needed.
+AmbientCapabilities=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+fi
+
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable "$APP" >/dev/null 2>&1 || true
+$SUDO systemctl restart "$APP"
+sleep 1
+$SUDO systemctl --no-pager status "$APP" | head -5 || true
+
+# ---- optional: Obsidian Headless sync as a service ------------------------------------
+if command -v ob >/dev/null 2>&1 && [ -f "$SYNC_TEMPLATE" ] && [ ! -f /etc/systemd/system/obsidian-sync.service ]; then
+  read -r -p "obsidian-headless (ob) found. Install the vault sync service (user $RUN_USER)? [y/N] " a </dev/tty
+  if [[ "${a:-}" =~ ^[Yy] ]]; then
+    home="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+    sed "s|@USER@|$RUN_USER|g; s|@HOME@|$home|g; s|@VAULT@|${VAULT_DIR:-$DATA_DIR/vault}|g; s|@OB@|$(command -v ob)|g" \
+      "$SYNC_TEMPLATE" | $SUDO tee /etc/systemd/system/obsidian-sync.service >/dev/null
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable --now obsidian-sync >/dev/null 2>&1 || true
+    echo "obsidian-sync installed. Log in and link the vault as that user first if you haven't:"
+    echo "  sudo -u $RUN_USER -H ob login && sudo -u $RUN_USER -H ob sync-setup --vault \"<remote vault>\" --path ${VAULT_DIR:-$DATA_DIR/vault}"
+  fi
+fi
+
+echo
+echo "Done. Logs:  journalctl -u $APP -f"
+echo
+echo "Now open your bot in Telegram and send this setup code to pair as the owner:"
+echo
+echo "      $SETUP_CODE"
+echo
+echo "(It works once. Lost it? It's OPTIMIMER_SETUP_CODE in $ENV_FILE and in the service log.)"

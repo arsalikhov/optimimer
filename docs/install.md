@@ -9,24 +9,71 @@ heavy LLM work happens at OpenRouter. The bot uses long polling, so the Pi needs
 - A **Telegram bot token**: talk to [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
 - An **OpenRouter API key** from [openrouter.ai](https://openrouter.ai).
 
-## Clone and run one script
+## Pick your platform
 
-On the Pi:
+Nobody needs a Rust toolchain: every release on the
+[Releases page](https://github.com/arsalikhov/optimimer/releases) ships prebuilt binaries.
+
+### Raspberry Pi OS, Debian, Ubuntu (.deb)
+
+```sh
+curl -LO https://github.com/arsalikhov/optimimer/releases/latest/download/optimimer-arm64.deb   # amd64 on a PC
+sudo apt install ./optimimer-arm64.deb
+sudo optimimer-setup
+```
+
+The package installs `/usr/bin/optimimer-backend`, a systemd service running as the `optimimer` system user, data in
+`/var/lib/optimimer` (database and vault) and config in `/etc/optimimer/optimimer.env`. `optimimer-setup` asks
+three things — timezone, Telegram bot token, OpenRouter API key — starts the service and prints the setup code.
+Updating is `apt install ./optimimer-arm64.deb` again with the new file; the service restarts on its own.
+
+### Arch Linux
+
+Every release attaches a `PKGBUILD` (package `optimimer-bin`, x86_64 and aarch64) with checksums:
+
+```sh
+mkdir optimimer && cd optimimer
+curl -LO https://github.com/arsalikhov/optimimer/releases/latest/download/PKGBUILD
+makepkg -si
+sudo optimimer-setup
+```
+
+Same layout as the .deb; the service account and directories come from `sysusers.d` / `tmpfiles.d`.
+
+### Docker (any Linux)
+
+```sh
+cat > optimimer.env <<EOF
+TELEGRAM_BOT_TOKEN=...
+OPENROUTER_API_KEY=...
+DEFAULT_TZ=Europe/London
+EOF
+docker run -d --name optimimer --restart unless-stopped --env-file optimimer.env \
+  -v optimimer-data:/var/lib/optimimer --network host --cap-add NET_RAW \
+  ghcr.io/arsalikhov/optimimer:latest
+docker logs optimimer      # shows the setup code
+```
+
+`--network host` and `NET_RAW` are only needed for Wake-on-LAN; drop them otherwise. Mount a host folder instead
+of the named volume if you want the vault synced by Obsidian on the same machine.
+
+### macOS and Windows
+
+Download `optimimer-<version>-macos-arm64.tar.gz` (Apple silicon), `-macos-amd64.tar.gz` (Intel) or
+`-windows-amd64.zip`, unpack, and follow the `README.md` inside: create a `.env` with the two keys next to the
+binary, run it, and send the setup code printed in the log to your bot. Keep it running with a launchd agent or a
+Task Scheduler task. macOS may ask you to allow the unsigned binary under Privacy & Security the first time.
+
+### From a git clone (any Linux with systemd)
 
 ```sh
 git clone https://github.com/arsalikhov/optimimer.git
 cd optimimer && ./install.sh
 ```
 
-The script copies the prebuilt binary and bundled agents into `/opt/optimimer`, installs `etherwake` for
-Wake-on-LAN when `apt` is available, and runs the interactive setup, which asks for:
-
-1. your default timezone (IANA name, e.g. `Europe/London`),
-2. the Telegram bot token,
-3. the OpenRouter API key.
-
-It writes a private `/opt/optimimer/optimimer.env` (mode 600), installs and starts the `optimimer` service, and ends
-with a **setup code** like `K7QD-3MXP`.
+Copies the prebuilt aarch64 binary (or builds from source when a Rust toolchain is present) into `/opt/optimimer`
+and runs the same setup as the package, as your own user. `./install.sh --no-setup` only copies the files. Update
+with `git pull && ./install.sh`.
 
 ## Pair your Telegram account
 
@@ -39,49 +86,51 @@ Lost the code? It is in `optimimer.env` as `OPTIMIMER_SETUP_CODE`, and the servi
 someone pairs: `journalctl -u optimimer -n 50`.
 
 Without git: download the repository as a zip from GitHub, unpack it, and run `./install.sh` from the folder.
-`./install.sh --no-setup` only copies the files, for when you want to run `/opt/optimimer/install.sh` later.
+`./install.sh --no-setup` only copies the files, for when you want to run `/opt/optimimer/optimimer-setup` later.
 
 Not on a Pi? On any Linux with a Rust toolchain the script builds the binary from source instead of using the
 prebuilt one.
 
 ## Updating
 
-```sh
-cd optimimer && git pull && ./install.sh
-```
+- `.deb`: download the new file and `sudo apt install ./optimimer-arm64.deb` again; the service restarts itself.
+- Arch: fetch the new `PKGBUILD`, `makepkg -si`.
+- Docker: `docker pull ghcr.io/arsalikhov/optimimer:latest`, then recreate the container.
+- Clone: `git pull && ./install.sh` (answer **Y** to keep the env file).
 
-It replaces the binary and agents, keeps `optimimer.env` (answer **Y** to "reuse it as-is"), and restarts the
-service. Your database and vault are untouched.
+Your database and vault are never touched by an update.
 
-## Everyday commands on the Pi
+## Everyday commands
 
 ```sh
 journalctl -u optimimer -f          # follow the log
 sudo systemctl restart optimimer    # restart
-/opt/optimimer/install.sh           # re-run setup (change secrets or timezone)
+sudo optimimer-setup                # re-run setup to change a secret or the timezone
 ```
 
-## Secrets without typing them
+(Clone installs: `/opt/optimimer/optimimer-setup`, no sudo.)
 
-The setup script uses any of these already present in its environment and skips the prompt: `TELEGRAM_BOT_TOKEN`,
-`OPENROUTER_API_KEY`, `DEFAULT_TZ`, `VAULT_DIR`, `OPTIMIMER_SETUP_CODE`, `TELEGRAM_ALLOWED_CHAT_IDS`,
-`RENT_AMOUNTS`, `RESEND_API_KEY`, `EMAIL_FROM`. With the `infisical` CLI on the Pi you can run
-`infisical run --env=prod -- /opt/optimimer/install.sh`, and the script offers to start the service through
-`infisical run` so secrets are injected at each start and never written to disk. From a dev machine,
-`make deploy PI=user@host INFISICAL_ENV=dev` does the same with your local Infisical (see
-[Development](development.md)).
+## Do I need a secret manager?
+
+No. The env file written by `optimimer-setup` is all the bot needs, and it is readable only by root and the
+service user. If you do use one, export the variables before running `optimimer-setup` and it asks nothing; any
+variable in the environment beats the file.
 
 ## Obsidian sync on the Pi
 
 To have the vault appear on your other devices without running the desktop app on the Pi, install **Obsidian
 Headless** (`npm install -g obsidian-headless`, Node 22+), then `ob login` and
-`ob sync-setup --vault "<remote vault>" --path /opt/optimimer/vault`. When `ob` is present, the setup script offers
+`ob sync-setup --vault "<remote vault>" --path /var/lib/optimimer/vault` (as the `optimimer` user for package
+installs: prefix both with `sudo -u optimimer -H`). When `ob` is present, the setup script offers
 to install a `obsidian-sync` service that runs `ob sync --continuous`. Details in [The vault](vault.md).
 
 ## Uninstall
 
 ```sh
+sudo apt purge optimimer            # .deb (Arch: sudo pacman -Rns optimimer-bin); data stays in /var/lib/optimimer
+sudo rm -rf /var/lib/optimimer      # …unless you want the database and vault gone too
+# clone install:
 sudo systemctl disable --now optimimer obsidian-sync 2>/dev/null
 sudo rm -f /etc/systemd/system/optimimer.service /etc/systemd/system/obsidian-sync.service
-sudo rm -rf /opt/optimimer          # includes the database and, unless you moved it, the vault
+sudo rm -rf /opt/optimimer
 ```

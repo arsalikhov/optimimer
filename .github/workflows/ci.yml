@@ -1,0 +1,17 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - run: cd backend && cargo test
+      - name: Shell syntax
+        run: bash -n install.sh deploy/optimimer-setup deploy/deb/build.sh && sh -n deploy/deb/postinst deploy/deb/prerm deploy/deb/postrm

@@ -16,9 +16,11 @@ backend/            Rust (axum + tokio + rusqlite) — the whole product
   agents/             bundled cmd-*.json parsers (todo, note, spent, earned, notify, email)
   assets/             starter .base files and Home.md
 frontend/           SvelteKit + @xyflow/svelte visual flow editor for the workflow agents (bun)
-deploy/             install.sh (runs on the Pi), obsidian-sync.service template, bin/ prebuilt aarch64 binary
-install.sh          the user-facing installer: copies this checkout into /opt/optimimer, runs deploy/install.sh
-scripts/            notion_export.py
+deploy/             optimimer-setup (the interactive setup), deb/ (Debian packaging), obsidian-sync.service
+                    template, bin/ prebuilt aarch64 binary for clone installs
+install.sh          clone install: copies this checkout into /opt/optimimer and runs deploy/optimimer-setup
+Dockerfile          runtime image published to ghcr.io by the release workflow
+.github/workflows/  ci.yml (cargo test) and release.yml (tag → .deb + tarballs + container image)
 docs/               this documentation (GitHub Pages)
 ```
 
@@ -28,8 +30,11 @@ docs/               this documentation (GitHub Pages)
 cp backend/.env.example backend/.env    # fill in TELEGRAM_BOT_TOKEN and OPENROUTER_API_KEY
 bun run setup                           # frontend deps
 bun run dev                             # backend on :8799 + frontend on :5173, colour-prefixed logs
-bun run dev:secure                      # same, secrets injected by `infisical run --env=dev`
 ```
+
+Only those two keys are needed; see [Configuration](configuration.md) for the optional ones. Real environment
+variables override the file, so a secret manager that exports variables (Infisical, 1Password CLI, …) works without
+any special support.
 
 Or just the backend: `cd backend && cargo run`. Tests: `cd backend && cargo test`. The repository is not
 `rustfmt`-clean by design; do not run `cargo fmt` on it.
@@ -59,11 +64,22 @@ make build-pi                            # refreshes deploy/bin/optimimer-backen
 make deploy PI=user@pi-host              # build, copy binary + agents + installer, run the interactive setup over SSH
 make redeploy PI=user@pi-host            # build, copy, restart — no prompts, config untouched
 make logs | restart | stop | uninstall PI=user@pi-host
-make deploy PI=… INFISICAL_ENV=dev       # inject secrets from your local Infisical into the remote setup
+make deploy PI=… INFISICAL_ENV=dev       # optional: export secrets from a local Infisical into the remote setup
 ```
 
 `build-pi` remaps source paths (`--remap-path-prefix`) so the committed binary contains no local directories.
 Committing the refreshed binary is what makes `./install.sh` on a fresh clone pick up your change.
+
+## Releasing
+
+```sh
+git tag v0.2.0 && git push --tags
+```
+
+The release workflow cross-compiles static binaries for arm64 and amd64, builds `.deb` packages with
+`deploy/deb/build.sh`, attaches them and tarballs to a GitHub Release, and pushes a multi-arch image to
+`ghcr.io/<owner>/optimimer`. Build a package locally with
+`deploy/deb/build.sh deploy/bin/optimimer-backend-aarch64 arm64 0.2.0 dist` (needs `dpkg-deb`).
 
 ## Workflow agents
 
