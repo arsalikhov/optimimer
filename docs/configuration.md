@@ -15,7 +15,7 @@ An environment variable always overrides the stored setting of the same meaning.
 | Variable | Purpose |
 | -------- | ------- |
 | `TELEGRAM_BOT_TOKEN` | From @BotFather. Without it the bot does not start (the HTTP API still does). |
-| `OPENROUTER_API_KEY` | All LLM calls and voice transcription. Unset, LLM steps return `[mock:…]` output. |
+| `OPENROUTER_API_KEY` | All LLM calls. A key with **no credits works** (free tier is the default). Unset: `[mock:…]`. |
 
 ## Access and onboarding
 
@@ -52,16 +52,38 @@ An environment variable always overrides the stored setting of the same meaning.
 | `OCR_MODEL` | `anthropic/claude-sonnet-4.6` | Vision model for receipt photos. |
 | `FINANCE_MODEL` | `anthropic/claude-sonnet-4.6` | Classifies CSV statement rows. |
 
-## Models and behaviour
+## Models
+
+Two tiers, picked during onboarding ("Free" is the default; the bot shows your OpenRouter balance and asks) or
+later by saying "use paid models" / "use free models":
+
+- **`free`** (default): `nvidia/nemotron-3-super-120b-a12b:free` for the agent, parsers and summaries;
+  `nvidia/nemotron-3.5-lightning:free` for memory, reminders and stock watches;
+  `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` for receipts and voice.
+- **`paid`**: `anthropic/claude-sonnet-4.6` for the agent, parsers, summaries and receipts;
+  `anthropic/claude-haiku-4.5` for memory and reminders; `mistralai/voxtral-small-24b-2507` for voice.
+
+Free models cost nothing but are rate-limited (about 50 requests a day, 1000 once the account has ever bought $10
+of credits), slower, and weaker at tool calling; voice and receipts are best-effort. Free model ids rotate on
+OpenRouter; when one disappears the bot says so and you can pin another.
 
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
-| `AGENT_MODEL` | `anthropic/claude-sonnet-4.6` | The conversational agent; must support tool calling. |
-| `MEMORY_MODEL` | `anthropic/claude-haiku-4.5` | Extracts facts after each turn; folds old turns into the summary. |
+| `MODEL_TIER` | stored setting | `free` or `paid`; overrides what was chosen in chat. |
+| `AGENT_MODEL` | tier default | The conversational agent; must support tool calling. |
+| `PARSER_MODEL` | tier default | Strict JSON parsers (tasks, notes, money). |
+| `MEMORY_MODEL` | tier default | Fact extraction and summary folding. |
+| `CONVO_MODEL` | tier default | Summaries of forwarded batches and voice memos. |
+| `FINANCE_MODEL` | tier default | CSV statement classification. |
+| `OCR_MODEL` | tier default | Receipt photos (needs image input). |
+| `TRANSCRIBE_MODEL` | tier default | Voice transcription (needs audio input). |
+| `SHOPPER_MODEL` | tier default | Reads product pages for stock watches. |
+
+## Behaviour
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
 | `MEMORY_WINDOW` | `12` | Recent turns the agent sees verbatim; older ones live in the rolling summary. |
-| `CONVO_MODEL` | `anthropic/claude-sonnet-4.6` | Summaries of forwarded batches and voice memos. |
-| `TRANSCRIBE_MODEL` | `mistralai/voxtral-small-24b-2507` | Voice transcription. |
-| `SHOPPER_MODEL` | — | Reads product pages for stock watches. |
 | `VOICE_MEMO_SECS` | `45` | Voice notes this long or longer are memos. |
 | `FORWARD_SETTLE_SECS` | `4` | Quiet time after the last forward before a batch is summarised. |
 | `FORWARD_PEEK_SECS` | `1` | Extra poll after a plain message to catch forwards behind it (`0` = off). |

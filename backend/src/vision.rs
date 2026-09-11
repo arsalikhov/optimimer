@@ -15,7 +15,7 @@ pub async fn read_receipt(image: Vec<u8>, mime: &str) -> Result<String> {
     if key.is_empty() {
         return Ok("[mock receipt — set OPENROUTER_API_KEY] Spent 0 at Unknown".to_string());
     }
-    let model = std::env::var("OCR_MODEL").unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+    let model = crate::llm::ocr();
     let mime = if mime.is_empty() { "image/jpeg" } else { mime };
 
     // Cache by a hash of the exact image bytes (+ model): re-sending the same
@@ -55,7 +55,7 @@ pub async fn read_receipt(image: Vec<u8>, mime: &str) -> Result<String> {
     let status = resp.status();
     let j: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        return Err(anyhow!("receipt OCR {}: {}", status, j));
+        return Err(crate::openrouter::explain("receipt OCR", &model, status, &j));
     }
     let out = j["choices"][0]["message"]["content"]
         .as_str()

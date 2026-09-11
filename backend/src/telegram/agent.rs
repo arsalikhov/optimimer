@@ -8,7 +8,7 @@ use crate::config;
 use crate::memory;
 
 pub(super) fn agent_model() -> String {
-    std::env::var("AGENT_MODEL").unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string())
+    crate::llm::agent()
 }
 
 /// Hard cap on tool round-trips per message, so a confused model can't loop forever.
@@ -106,6 +106,7 @@ pub(super) fn agent_tools() -> Value {
         tool_def("set_categories", "Replace the task/note categories (owner only; the user confirms with a button). Pass 'Name: hint, Name: hint, …' with the catch-all last. Never call this just because a task doesn't fit — only when the user asks to change the categories.", obj(json!({ "list": { "type": "string" } }), &["list"])),
         tool_def("add_vocab", "Add words the voice transcriber should spell correctly (names, brands, jargon).", obj(json!({ "terms": { "type": "string", "description": "comma-separated" } }), &["terms"])),
         tool_def("invite_user", "Create a one-time invite code that lets another Telegram account use this assistant (owner only).", obj(json!({}), &[])),
+        tool_def("set_models", "Switch between 'free' (OpenRouter's free models, no credits) and 'paid' (Claude Sonnet/Haiku + Voxtral) models. Owner only.", obj(json!({ "tier": { "type": "string", "enum": ["free", "paid"] } }), &["tier"])),
         tool_def("remove_user", "Revoke a member's access by their name or chat id (owner only; the owner can't be removed).", obj(json!({ "who": { "type": "string" } }), &["who"])),
         tool_def("restart_setup", "Run the first-time setup dialogue again (name, timezone, categories, machine).", obj(json!({}), &[])),
     ])
@@ -266,6 +267,12 @@ pub(super) async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: 
             let code = config::new_invite();
             observe(format!("Invite code: {code} — they message this bot and send it; it works once."))
         }
+        "set_models" => {
+            if !state.is_owner(chat_id) { return observe("Only the owner can change the models."); }
+            let paid = s("tier") == "paid";
+            crate::llm::set_tier(if paid { crate::llm::Tier::Paid } else { crate::llm::Tier::Free });
+            observe(format!("Models: {}", crate::llm::describe()))
+        }
         "remove_user" => {
             if !state.is_owner(chat_id) { return observe("Only the owner can remove people."); }
             let who = s("who");
@@ -344,7 +351,7 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
         let msg = match crate::openrouter::chat_tools(&agent_model(), &messages, &tools).await {
             Ok(m) => m,
             Err(e) => {
-                final_text = format!("Something went wrong talking to the model: {e}");
+                final_text = format!("I couldn't get an answer from the model — {e}");
                 break;
             }
         };

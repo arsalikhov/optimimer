@@ -1,0 +1,130 @@
+//! Which LLMs to use. Two tiers:
+//!
+//! * `free` (the default) — OpenRouter's free models. No credits needed, so a
+//!   fresh account works out of the box; slower and less accurate, and the
+//!   audio/vision ones are best-effort.
+//! * `paid` — Claude Sonnet 4.6 / Haiku 4.5 and Voxtral, billed to the
+//!   account's OpenRouter credits. Best results.
+//!
+//! The tier is a stored setting (`model_tier`, env `MODEL_TIER`) that the owner
+//! picks during onboarding or by saying "use paid models". Each role can still
+//! be pinned to any OpenRouter id with its own env var (AGENT_MODEL, …).
+//! Free model ids rotate on OpenRouter; when one disappears the error the user
+//! sees says so, and the matching env var is the escape hatch.
+
+use crate::config;
+
+pub const TIER: &str = "model_tier";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Free,
+    Paid,
+}
+
+pub fn tier() -> Tier {
+    match config::get(TIER).as_deref().map(|s| s.trim().to_lowercase()).as_deref() {
+        Some("paid") => Tier::Paid,
+        _ => Tier::Free,
+    }
+}
+
+pub fn set_tier(t: Tier) {
+    config::set(TIER, if t == Tier::Paid { "paid" } else { "free" });
+}
+
+pub fn is_paid() -> bool {
+    tier() == Tier::Paid
+}
+
+struct Set {
+    /// The conversational agent (must support tool calling).
+    agent: &'static str,
+    /// Strict JSON parsers (tasks, notes, money, CSV rows, summaries).
+    parser: &'static str,
+    /// Cheap background work (memory extraction, reminders, email drafts).
+    cheap: &'static str,
+    /// Receipt photos (needs image input).
+    ocr: &'static str,
+    /// Voice notes (needs audio input).
+    transcribe: &'static str,
+    /// Reading product pages for stock watches.
+    shopper: &'static str,
+}
+
+const FREE: Set = Set {
+    agent: "nvidia/nemotron-3-super-120b-a12b:free",
+    parser: "nvidia/nemotron-3-super-120b-a12b:free",
+    cheap: "nvidia/nemotron-3.5-lightning:free",
+    ocr: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    transcribe: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    shopper: "nvidia/nemotron-3.5-lightning:free",
+};
+
+const PAID: Set = Set {
+    agent: "anthropic/claude-sonnet-4.6",
+    parser: "anthropic/claude-sonnet-4.6",
+    cheap: "anthropic/claude-haiku-4.5",
+    ocr: "anthropic/claude-sonnet-4.6",
+    transcribe: "mistralai/voxtral-small-24b-2507",
+    shopper: "nvidia/nemotron-3-super-120b-a12b",
+};
+
+fn set() -> &'static Set {
+    if is_paid() { &PAID } else { &FREE }
+}
+
+/// An explicit env override wins; otherwise the tier's default for the role.
+fn pick(env: &str, role: fn(&Set) -> &'static str) -> String {
+    match std::env::var(env) {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => role(set()).to_string(),
+    }
+}
+
+pub fn agent() -> String { pick("AGENT_MODEL", |s| s.agent) }
+pub fn parser() -> String { pick("PARSER_MODEL", |s| s.parser) }
+pub fn memory() -> String { pick("MEMORY_MODEL", |s| s.cheap) }
+pub fn convo() -> String { pick("CONVO_MODEL", |s| s.parser) }
+pub fn finance() -> String { pick("FINANCE_MODEL", |s| s.parser) }
+pub fn ocr() -> String { pick("OCR_MODEL", |s| s.ocr) }
+pub fn transcribe() -> String { pick("TRANSCRIBE_MODEL", |s| s.transcribe) }
+pub fn shopper() -> String { pick("SHOPPER_MODEL", |s| s.shopper) }
+
+/// A workflow node's `model` field: a placeholder follows the tier, anything
+/// else is a literal OpenRouter id.
+pub fn resolve(spec: &str) -> String {
+    match spec.trim() {
+        "" | "auto" | "$agent" => agent(),
+        "$parser" => parser(),
+        "$cheap" => memory(),
+        other => other.to_string(),
+    }
+}
+
+/// One line for `show_settings` and the onboarding prompt.
+pub fn describe() -> String {
+    let base = match tier() {
+        Tier::Free => "free (OpenRouter's free Nemotron models — no credits needed, weaker)".to_string(),
+        Tier::Paid => "paid (Claude Sonnet 4.6 / Haiku 4.5 + Voxtral via OpenRouter credits)".to_string(),
+    };
+    let pinned: Vec<String> = ["AGENT_MODEL", "PARSER_MODEL", "MEMORY_MODEL", "CONVO_MODEL", "FINANCE_MODEL", "OCR_MODEL", "TRANSCRIBE_MODEL", "SHOPPER_MODEL"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()).map(|v| format!("{k}={v}")))
+        .collect();
+    if pinned.is_empty() { base } else { format!("{base}; pinned: {}", pinned.join(", ")) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholders_follow_the_tier() {
+        // No settings db in tests → free tier; no env → tier defaults.
+        assert_eq!(resolve("$parser"), FREE.parser);
+        assert_eq!(resolve(""), FREE.agent);
+        assert_eq!(resolve("some/model"), "some/model");
+        assert!(FREE.agent.ends_with(":free") && FREE.ocr.ends_with(":free"));
+    }
+}

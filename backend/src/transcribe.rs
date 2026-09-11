@@ -12,8 +12,7 @@ pub async fn transcribe(audio: Vec<u8>, format: &str) -> Result<String> {
     if key.is_empty() {
         return Ok(format!("[mock transcript — set OPENROUTER_API_KEY] ({} bytes)", audio.len()));
     }
-    let model = std::env::var("TRANSCRIBE_MODEL")
-        .unwrap_or_else(|_| "mistralai/voxtral-small-24b-2507".to_string());
+    let model = crate::llm::transcribe();
 
     // Bias the model toward the user's domain vocabulary (names, brands, jargon)
     // so an acronym or product name isn't misheard. The list lives in settings
@@ -50,7 +49,7 @@ pub async fn transcribe(audio: Vec<u8>, format: &str) -> Result<String> {
     let status = resp.status();
     let j: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        return Err(anyhow!("transcribe {}: {}", status, j));
+        return Err(crate::openrouter::explain("transcription", &model, status, &j));
     }
     j["choices"][0]["message"]["content"]
         .as_str()

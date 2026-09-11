@@ -7,7 +7,8 @@ heavy LLM work happens at OpenRouter. The bot uses long polling, so the Pi needs
 
 - A Raspberry Pi (64-bit OS) with `curl` and `sudo`.
 - A **Telegram bot token**: talk to [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
-- An **OpenRouter API key** from [openrouter.ai](https://openrouter.ai).
+- An **OpenRouter API key** from [openrouter.ai](https://openrouter.ai). No credits are required: the bot uses free
+  models by default and offers the paid Claude models during setup if you have a balance.
 
 ## Pick your platform
 

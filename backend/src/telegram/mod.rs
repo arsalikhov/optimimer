@@ -220,7 +220,7 @@ pub async fn run_bot(store: Store, db: Db) {
 
             // While setup is running it owns every message (text, pins, buttons).
             if onboarding::active(chat_id) {
-                if let Some(reply) = onboarding::step(&state, chat_id, msg) {
+                if let Some(reply) = onboarding::step(&state, chat_id, msg).await {
                     send(&client, &api, chat_id, &reply).await;
                 }
                 continue;

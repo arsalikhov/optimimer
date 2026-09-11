@@ -9,7 +9,9 @@ After you send the setup code the bot runs a short onboarding:
 3. **Categories** (owner only) — keep the defaults (Admin, Work, Fitness, Home, Finance, Learning, Social, Travel,
    Personal) or send your own as `Name: what belongs there, Name: …`. The last one is the catch-all. Projects nest
    under categories, and the bot may create projects but never categories.
-4. **Machine** (owner only, optional) — `name MAC [interface]` for Wake-on-LAN, or Skip.
+4. **Models** (owner only) — free (default; no OpenRouter credits needed) or paid (Claude + Voxtral, best
+   results). The bot shows your OpenRouter balance. Switch later with "use paid models" / "use free models".
+5. **Machine** (owner only, optional) — `name MAC [interface]` for Wake-on-LAN, or Skip.
 
 Say "run setup again" any time to repeat it, or "show settings" to see what is stored.
 
@@ -33,7 +35,7 @@ What you can ask for, by area:
 | Stock watches | "watch <url>", "my watches", "stop watching 2" |
 | Machines | "wake the desktop", "add machine nas aa:bb:cc:dd:ee:ff", "remove machine nas" |
 | Memory | "remember that Sam prefers mornings", "what do you know about Sam?" |
-| Settings | "call me Alex", "my timezone is Europe/Berlin", "show settings", "run setup again" |
+| Settings | "call me Alex", "my timezone is Europe/Berlin", "show settings", "run setup again", "use paid models" |
 | People | "invite someone", "remove Sam" |
 | Voice | "for voice notes, learn the word Kubernetes" |
 

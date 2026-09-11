@@ -3,7 +3,8 @@
 A private assistant you talk to on **Telegram**, running on your own **Raspberry Pi**. It files tasks, notes and
 voice memos into your **Obsidian** vault, keeps a money ledger, remembers what you tell it, sets reminders, manages
 shopping lists, watches product pages, wakes your desktop over the network, and summarises forwarded chats — with no
-slash commands. You say what you want; a tool-calling model (Claude via OpenRouter) does it.
+slash commands. You say what you want; a tool-calling model does it — OpenRouter's free models by default, Claude if
+you add credits.
 
 Everything personal stays in two things you own: the vault (Markdown + frontmatter, queryable with Obsidian Bases)
 and one SQLite file on the Pi. Nothing about you is in this repository or the binary.

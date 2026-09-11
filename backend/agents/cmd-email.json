@@ -13,7 +13,7 @@
       "position": { "x": 320, "y": 200 },
       "data": {
         "label": "Draft email",
-        "model": "anthropic/claude-haiku-4.5",
+        "model": "$cheap",
         "system": "Turn a request into an email. Output ONLY minified JSON — no prose, no code fences. Keys: to (recipient email address, or \"\" if none given), subject (short), text (plain-text body), confirmation (one-line human summary).",
         "prompt": "{{input.text}}"
       }

@@ -201,8 +201,7 @@ async fn check_stock(client: &reqwest::Client, url: &str) -> anyhow::Result<Stoc
         .await?;
 
     let text = page_text(&html, 12_000);
-    let model = std::env::var("SHOPPER_MODEL")
-        .unwrap_or_else(|_| "nvidia/nemotron-3-super-120b-a12b".to_string());
+    let model = crate::llm::shopper();
     let system = "You judge whether a product page shows the product as purchasable RIGHT NOW. \
                   Signals for in stock: an enabled add-to-cart/buy button, 'in stock', a deliverable date. \
                   Signals against: 'out of stock', 'sold out', 'unavailable', 'notify me when available', \

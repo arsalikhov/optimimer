@@ -196,14 +196,8 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
         "trigger" => Ok((ctx.input.clone(), vec![])),
 
         "llm" => {
-            let model = {
-                let m = field("model");
-                if m.is_empty() {
-                    "nvidia/nemotron-3-super-120b-a12b".to_string()
-                } else {
-                    m
-                }
-            };
+            // "$parser" / "$cheap" / "" follow the configured model tier (crate::llm).
+            let model = crate::llm::resolve(&field("model"));
             let system = ctx.interpolate(&field("system"));
             let prompt = ctx.interpolate(&field("prompt"));
             let text = openrouter::chat(&model, &system, &prompt).await?;

@@ -892,7 +892,7 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
     if key.is_empty() {
         return Err(anyhow!("OPENROUTER_API_KEY unset — cannot parse CSV"));
     }
-    let model = std::env::var("FINANCE_MODEL").unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+    let model = crate::llm::finance();
     // Cap the payload so a huge statement can't blow the context window.
     let csv = if csv.len() > 16000 { &csv[..16000] } else { csv };
 

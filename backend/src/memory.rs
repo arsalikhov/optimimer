@@ -64,7 +64,7 @@ pub fn window() -> usize {
 }
 
 fn model() -> String {
-    std::env::var("MEMORY_MODEL").unwrap_or_else(|_| "anthropic/claude-haiku-4.5".to_string())
+    crate::llm::memory()
 }
 
 fn norm(s: &str) -> String {

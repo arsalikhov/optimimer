@@ -1,5 +1,5 @@
 //! First-contact setup. After a chat pairs (setup code → owner, invite code →
-//! member) the bot walks it through name → timezone → categories → machine,
+//! member) the bot walks it through name → timezone → categories → models → machine,
 //! saving each answer in `crate::config`, then hands over to the agent. The
 //! current step is kept per chat in the settings table, so a restart mid-way
 //! resumes where it left off. Members only get the first two steps.
@@ -47,7 +47,7 @@ pub(super) fn start(chat_id: i64, owner: bool, first_name: &str) -> Reply {
 
 /// Handle a message while setup is active. Returns `None` only when setup
 /// isn't running for this chat.
-pub(super) fn step(state: &BotState, chat_id: i64, msg: &Value) -> Option<Reply> {
+pub(super) async fn step(state: &BotState, chat_id: i64, msg: &Value) -> Option<Reply> {
     let step = config::stored(&key(chat_id))?;
     if let Some(loc) = msg.get("location").filter(|l| !l.is_null()) {
         if step == "tz" {
@@ -62,27 +62,27 @@ pub(super) fn step(state: &BotState, chat_id: i64, msg: &Value) -> Option<Reply>
     if text.is_empty() {
         return Some(Reply::text("Let's finish setting up first — answer the question above, or tap a button."));
     }
-    Some(answer(state, chat_id, &step, text))
+    Some(answer(state, chat_id, &step, text).await)
 }
 
 /// A tapped button (`ob:` prefix already stripped).
-pub(super) fn callback(state: &BotState, chat_id: i64, data: &str) -> Reply {
+pub(super) async fn callback(state: &BotState, chat_id: i64, data: &str) -> Reply {
     let Some(step) = config::stored(&key(chat_id)) else {
         return Reply::text("Setup is already finished — just talk to me.");
     };
     let (what, val) = data.split_once(':').unwrap_or((data, ""));
-    let expected = match what { "name" => "name", "tz" => "tz", "cats" => "categories", "machine" => "machine", _ => "" };
+    let expected = match what { "name" => "name", "tz" => "tz", "cats" => "categories", "models" => "models", "machine" => "machine", _ => "" };
     if expected != step {
         return Reply::text("That step is done — answer the current question instead.");
     }
-    answer(state, chat_id, &step, if val.is_empty() { "keep" } else { val })
+    answer(state, chat_id, &step, if val.is_empty() { "keep" } else { val }).await
 }
 
 fn is_owner(state: &BotState, chat_id: i64) -> bool {
     state.is_owner(chat_id)
 }
 
-fn answer(state: &BotState, chat_id: i64, step: &str, text: &str) -> Reply {
+async fn answer(state: &BotState, chat_id: i64, step: &str, text: &str) -> Reply {
     match step {
         "name" => {
             let name: String = text.chars().take(60).collect();
@@ -119,13 +119,12 @@ fn answer(state: &BotState, chat_id: i64, step: &str, text: &str) -> Reply {
                 crate::memory::global().seed_categories();
                 format!("Categories saved: {}.\n\n", parsed.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", "))
             };
-            set_step(chat_id, "machine");
-            with_buttons(
-                format!(
-                    "{done}Last one, optional: is there a computer I should be able to wake over the network (Wake-on-LAN)? Send `name MAC [interface]`, e.g. `desktop aa:bb:cc:dd:ee:ff eth0`."
-                ),
-                vec![("Skip".to_string(), "ob:machine:skip".to_string())],
-            )
+            ask_models(chat_id, done).await
+        }
+        "models" => {
+            let paid = matches!(text, "paid" | "Paid" | "claude");
+            crate::llm::set_tier(if paid { crate::llm::Tier::Paid } else { crate::llm::Tier::Free });
+            ask_machine(chat_id, format!("Using {} models.\n\n", if paid { "paid" } else { "free" }))
         }
         "machine" => {
             let mut prefix = String::new();
@@ -145,6 +144,36 @@ fn answer(state: &BotState, chat_id: i64, step: &str, text: &str) -> Reply {
         }
         _ => finish(chat_id, String::new()),
     }
+}
+
+/// Free vs paid models, with the account's OpenRouter balance when we can read it.
+async fn ask_models(chat_id: i64, prefix: String) -> Reply {
+    set_step(chat_id, "models");
+    let balance = crate::openrouter::credits().await;
+    let money = match balance {
+        Some(b) if b <= 0.0 => "Your OpenRouter balance is $0, so only free models will work until you add credits.".to_string(),
+        Some(b) => format!("Your OpenRouter balance: ${b:.2}."),
+        None => "I couldn't read your OpenRouter balance.".to_string(),
+    };
+    with_buttons(
+        format!(
+            "{prefix}Which models should I use?\n\
+             • Free — OpenRouter's free models. No credits needed; slower and less accurate, and voice notes or receipt photos may misfire.\n\
+             • Paid — Claude Sonnet 4.6 / Haiku 4.5 and Voxtral, billed to your OpenRouter credits. Best results.\n\
+             {money} You can switch any time by saying \"use paid models\" or \"use free models\"."
+        ),
+        vec![("Free (default)".to_string(), "ob:models:free".to_string()), ("Paid (Claude)".to_string(), "ob:models:paid".to_string())],
+    )
+}
+
+fn ask_machine(chat_id: i64, prefix: String) -> Reply {
+    set_step(chat_id, "machine");
+    with_buttons(
+        format!(
+            "{prefix}Last one, optional: is there a computer I should be able to wake over the network (Wake-on-LAN)? Send `name MAC [interface]`, e.g. `desktop aa:bb:cc:dd:ee:ff eth0`."
+        ),
+        vec![("Skip".to_string(), "ob:machine:skip".to_string())],
+    )
 }
 
 fn after_tz(state: &BotState, chat_id: i64, prefix: String) -> Reply {
@@ -206,8 +235,9 @@ pub(super) fn settings_reply(state: &BotState, chat_id: i64) -> Reply {
     let name = { let n = config::chat_name(chat_id); if n.is_empty() { config::owner_name() } else { n } };
     let name = if name.is_empty() { "(not set)".to_string() } else { name };
     Reply::text(format!(
-        "Name: {name}\nTimezone: {} (default {})\nCategories: {cats}\nMachines: {machines}\nVoice vocabulary: {vocab}\nPaired chats: {paired}",
+        "Name: {name}\nTimezone: {} (default {})\nModels: {}\nCategories: {cats}\nMachines: {machines}\nVoice vocabulary: {vocab}\nPaired chats: {paired}",
         tz_for(state, chat_id),
         config::get(config::TIMEZONE).unwrap_or_else(|| "UTC".into()),
+        crate::llm::describe(),
     ))
 }

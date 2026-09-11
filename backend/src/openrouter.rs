@@ -33,7 +33,7 @@ pub async fn chat(model: &str, system: &str, prompt: &str) -> Result<String> {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
     if !status.is_success() {
-        return Err(anyhow!("OpenRouter {}: {}", status, body));
+        return Err(explain("chat", model, status, &body));
     }
 
     body["choices"][0]["message"]["content"]
@@ -70,11 +70,47 @@ pub async fn chat_tools(model: &str, messages: &[Value], tools: &Value) -> Resul
     let status = resp.status();
     let body: Value = resp.json().await?;
     if !status.is_success() {
-        return Err(anyhow!("OpenRouter {}: {}", status, body));
+        return Err(explain("agent", model, status, &body));
     }
     let msg = body["choices"][0]["message"].clone();
     if msg.is_null() {
         return Err(anyhow!("unexpected OpenRouter response: {}", body));
     }
     Ok(msg)
+}
+
+/// Turn an OpenRouter error into something the user can act on. The common
+/// failures of a fresh account (no key, no credits, a free model that was
+/// retired, the free-tier rate limit) each get a plain-words hint.
+pub fn explain(what: &str, model: &str, status: reqwest::StatusCode, body: &Value) -> anyhow::Error {
+    let detail = body["error"]["message"].as_str().unwrap_or("").trim().to_string();
+    let hint = match status.as_u16() {
+        401 => "OpenRouter rejected the API key — check OPENROUTER_API_KEY.".to_string(),
+        402 => "your OpenRouter account has no credits. Add some at https://openrouter.ai/credits, or say \"use free models\".".to_string(),
+        404 => format!("the model `{model}` isn't available on OpenRouter right now (free model ids change). Say \"use paid models\", or pin another id with the matching *_MODEL variable."),
+        429 => "OpenRouter's rate limit hit. Free models allow roughly 50 requests a day (1000 once the account has ever bought $10 of credits) — wait a bit, or say \"use paid models\".".to_string(),
+        _ => format!("OpenRouter {status}: {}", if detail.is_empty() { body.to_string() } else { detail }),
+    };
+    anyhow!("{what}: {hint}")
+}
+
+/// Remaining OpenRouter balance in dollars, or `None` without a key / offline.
+pub async fn credits() -> Option<f64> {
+    let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    if key.trim().is_empty() {
+        return None;
+    }
+    let body: Value = reqwest::Client::new()
+        .get("https://openrouter.ai/api/v1/credits")
+        .bearer_auth(key.trim())
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let total = body["data"]["total_credits"].as_f64()?;
+    let used = body["data"]["total_usage"].as_f64().unwrap_or(0.0);
+    Some(total - used)
 }

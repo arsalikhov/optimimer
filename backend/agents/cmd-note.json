@@ -21,7 +21,7 @@
       },
       "data": {
         "label": "Classify note",
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "$parser",
         "system": "You file a note into the user's Obsidian vault. Output ONLY minified JSON — no prose, no code fences. You are given the note text, the CATEGORIES list and EXISTING TAGS. Output keys: title (a short, descriptive note title, max 8 words, not repeating the category name), category (exactly one name from CATEGORIES), status (\"inbox\" for a quick capture/idea, \"draft\" for a worked-out draft, \"final\" for a finished/reference note), tags (array of 1-4 lowercase kebab-case tags; reuse existing tags when they fit, invent a new one only when nothing fits).",
         "prompt": "NOTE:\n{{input.text}}\n\nCATEGORIES:\n{{input.categories}}\n\nEXISTING TAGS:\n{{input.tags}}"
       }

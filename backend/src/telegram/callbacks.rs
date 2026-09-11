@@ -11,7 +11,7 @@ pub(super) async fn handle_callback(client: &reqwest::Client, api: &str, state: 
 
     // Onboarding buttons (one-tap defaults: name, keep timezone/categories, skip machine).
     if let (Some(rest), Some(chat)) = (data.strip_prefix("ob:"), chat_id) {
-        let reply = onboarding::callback(state, chat, rest);
+        let reply = onboarding::callback(state, chat, rest).await;
         send(client, api, chat, &reply).await;
     }
 

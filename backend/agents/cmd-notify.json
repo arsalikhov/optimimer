@@ -21,7 +21,7 @@
       },
       "data": {
         "label": "Parse notification",
-        "model": "anthropic/claude-haiku-4.5",
+        "model": "$cheap",
         "system": "Turn a request into a Telegram notification. Output ONLY minified JSON — no prose, no code fences. NEVER compute dates/times yourself; only EXTRACT time tokens into a `when` object (code resolves them, defaulting to now if empty). `when` fields (include only those mentioned, or set when to {} for 'send now'): in_minutes, in_hours, in_days, weekday, weekday_next, month, day, year, hour (0-23; '2pm'=>14), minute. Output keys: when (token object, {} = now), message (the notification text).",
         "prompt": "{{input.text}}"
       }

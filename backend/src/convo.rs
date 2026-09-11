@@ -439,7 +439,7 @@ pub fn message_body(msg: &Value) -> String {
 // ---------------------------------------------------------------------------
 
 fn model() -> String {
-    std::env::var("CONVO_MODEL").unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string())
+    crate::llm::convo()
 }
 
 /// Ask the model for a title, key points, and action items. `note` is the
