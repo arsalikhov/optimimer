@@ -72,7 +72,7 @@ pub(super) async fn handle_todo(state: &BotState, chat_id: i64, body: &str) -> R
         Err(e) => return Reply::text(format!("Couldn't write the task file: {}", vault::err_hint(&e))),
     };
     crate::charts::refresh_gantt();
-    link_vault_doc("task", &doc);
+    crate::memory::link_vault_doc("task", &doc);
     let esc = vault::html_escape;
     let when = if start.is_empty() {
         "no date".to_string()
@@ -137,38 +137,12 @@ pub(super) async fn handle_note(state: &BotState, chat_id: i64, body: &str) -> R
     };
     match vault::write_note(note) {
         Ok(doc) => {
-            link_vault_doc("note", &doc);
+            crate::memory::link_vault_doc("note", &doc);
             let tags = doc.get("tags").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(|t| t.as_str()).map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")).unwrap_or_default();
             Reply::text(format!("Saved note *{}* [{}] ({}) {}\n📁 {}", md_escape(&title), doc.str("category"), doc.str("status"), md_escape(&tags), md_escape(&doc.rel)))
         }
         Err(e) => Reply::text(format!("Couldn't write the note file: {}", vault::err_hint(&e))),
     }
-}
-
-/// Register a vault doc in the memory graph: a node carrying its path, linked
-/// to its category and project nodes, so `recall` can surface it and the
-/// Obsidian graph shows the connection.
-fn link_vault_doc(kind: &str, doc: &vault::Doc) {
-    let m = crate::memory::global();
-    let node = m.upsert_node(kind, &doc.title(), "", &doc.rel);
-    let cat = doc.str("category");
-    let cat_node = if cat.is_empty() { None } else { Some(m.upsert_node("category", &cat, "", "")) };
-    if let Some(c) = &cat_node {
-        m.add_edge(&node.id, &c.id, "in category", &doc.rel);
-    }
-    let project = doc.str("project");
-    if !project.is_empty() {
-        let pn = m.upsert_node("project", &project, "", "");
-        m.add_edge(&node.id, &pn.id, "part of", &doc.rel);
-        if let Some(c) = &cat_node {
-            m.add_edge(&pn.id, &c.id, "in category", "");
-        }
-        let _ = crate::vault::mirror_memory_node(&pn, &m.neighbors(&pn.id, 12));
-    }
-    if let Some(c) = &cat_node {
-        let _ = crate::vault::mirror_memory_node(c, &m.neighbors(&c.id, 12));
-    }
-    let _ = crate::vault::mirror_memory_node(&node, &m.neighbors(&node.id, 12));
 }
 
 fn first_words(s: &str, n: usize) -> String {

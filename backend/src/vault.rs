@@ -26,7 +26,8 @@ pub const TASKS: &str = "tasks";
 pub const SUMMARIES: &str = "summaries";
 /// Ledger mirror: one small note per transaction so Obsidian Bases can chart them.
 pub const FINANCE: &str = "finance";
-/// Knowledge-graph mirror: one note per memory node, wikilinked to its neighbours.
+/// Knowledge-graph mirror: one flat note per memory node (people, projects, categories, facts…),
+/// wikilinked to its neighbours and to the task/note files it relates to.
 pub const MEMORY: &str = "memory";
 
 /// Root of the vault. `VAULT_DIR` may be absolute (`/opt/optimimer/vault`) or
@@ -604,16 +605,25 @@ pub fn ensure_starter_files() -> Result<Vec<&'static str>> {
 // Memory graph mirror
 // ---------------------------------------------------------------------------
 
-fn memory_rel(node: &crate::memory::Node) -> String {
+/// Where a node's note lives. Tasks and notes have no memory note: their own
+/// vault file is the record, so links point straight at it.
+fn memory_link(node: &crate::memory::Node) -> String {
+    if !node.path.is_empty() {
+        return node.path.clone();
+    }
     let slug_part = node.id.split_once(':').map(|(_, s)| s).unwrap_or(&node.id);
-    format!("{MEMORY}/{}/{}", slug(&node.kind), slug_part)
+    format!("{MEMORY}/{slug_part}")
 }
 
 /// Write (or rewrite) the vault note for one memory node: frontmatter with its
 /// kind and stats, the summary, and a "Related" list of wikilinks — to other
-/// memory notes and, for task/note nodes, to the vault file itself.
+/// memory notes or, for task/note neighbours, to the vault file itself. Nodes
+/// that ARE vault files (tasks, notes) get no note of their own.
 pub fn mirror_memory_node(node: &crate::memory::Node, neighbors: &[(String, crate::memory::Node)]) -> Result<Doc> {
-    let rel = memory_rel(node);
+    if !node.path.is_empty() {
+        return Ok(Doc::default());
+    }
+    let rel = memory_link(node);
     let path = dir().join(format!("{rel}.md"));
     let mut doc = Doc { path, rel: rel.clone(), ..Default::default() };
     doc.set("title", Value::String(node.name.clone()));
@@ -621,21 +631,15 @@ pub fn mirror_memory_node(node: &crate::memory::Node, neighbors: &[(String, crat
     doc.set("kind", Value::String(node.kind.clone()));
     doc.set("mentions", Value::from(node.mentions));
     doc.set("updated", Value::String(local_iso(&node.updated)));
-    if !node.path.is_empty() {
-        doc.set("vault_file", Value::String(format!("[[{}]]", node.path)));
-    }
     let mut body = String::new();
     if !node.summary.is_empty() {
         body.push_str(&node.summary);
         body.push('\n');
     }
-    if !node.path.is_empty() {
-        body.push_str(&format!("\nSource file: [[{}]]\n", node.path));
-    }
     if !neighbors.is_empty() {
         body.push_str("\n## Related\n\n");
         for (r, n) in neighbors {
-            body.push_str(&format!("- {r}: [[{}|{}]]\n", memory_rel(n), n.name));
+            body.push_str(&format!("- {r}: [[{}|{}]]\n", memory_link(n), n.name));
         }
     }
     doc.body = body;
@@ -646,16 +650,7 @@ pub fn mirror_memory_node(node: &crate::memory::Node, neighbors: &[(String, crat
 /// How many memory notes exist on disk (to decide whether to re-mirror at start).
 pub fn memory_mirror_count() -> usize {
     fs::read_dir(dir().join(MEMORY))
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.path().is_dir())
-                .map(|e| {
-                    fs::read_dir(e.path())
-                        .map(|r| r.flatten().filter(|f| f.path().extension().and_then(|x| x.to_str()) == Some("md")).count())
-                        .unwrap_or(0)
-                })
-                .sum()
-        })
+        .map(|rd| rd.flatten().filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md")).count())
         .unwrap_or(0)
 }
 

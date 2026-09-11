@@ -8,8 +8,9 @@
 //!   preferences, facts, plus tasks/notes the bot created) and typed relations
 //!   between them, with an FTS5 index over names and summaries. Extraction runs
 //!   in the background after each exchange with a cheap model.
-//! * Every node is mirrored to `memory/<kind>/<slug>.md` in the vault with
-//!   wikilinks for its edges, so the graph is visible in Obsidian's graph view.
+//! * Every node except tasks/notes (their vault file is the record) is mirrored
+//!   to `memory/<slug>.md` with wikilinks for its edges, so the graph is visible
+//!   in Obsidian's graph view. Names are unique across kinds: one node per name.
 //!
 //! `recall(query)` is the agent's tool: FTS hits + one hop of neighbours,
 //! ranked by mentions and recency, rendered as a short bullet list.
@@ -43,8 +44,13 @@ static GLOBAL: OnceLock<Memory> = OnceLock::new();
 pub fn init(db: Db) -> Memory {
     let m = Memory { db };
     let _ = GLOBAL.set(m.clone());
+    m.seed_categories();
     m
 }
+
+/// Kinds the extractor may create. `category` is deliberately absent: the
+/// category list is fixed (see `vault::categories`) and seeded at startup.
+pub const KINDS: &[&str] = &["person", "organization", "project", "place", "topic", "preference", "fact", "event"];
 
 pub fn global() -> Memory {
     GLOBAL
@@ -133,22 +139,65 @@ impl Memory {
 
     // ---- graph ---------------------------------------------------------------
 
-    /// Insert or refresh a node. A repeat mention bumps `mentions` and, when a
-    /// non-empty summary is given, replaces the summary. Returns the node.
+    /// Make sure every configured category exists as a node (with its hint as
+    /// the summary), so extraction resolves "SageMesh" to the category rather
+    /// than inventing a project of the same name.
+    pub fn seed_categories(&self) {
+        for (name, hint) in crate::vault::categories() {
+            if self.by_name(&name).is_none() {
+                self.upsert_node("category", &name, &hint, "");
+            }
+        }
+    }
+
+    /// The node mirroring a vault file, if any.
+    pub fn by_path(&self, path: &str) -> Option<Node> {
+        if path.is_empty() {
+            return None;
+        }
+        let conn = self.db.lock();
+        conn.query_row(&format!("SELECT {NODE_COLS} FROM mem_nodes WHERE path = ?1 LIMIT 1"), params![path], row_node)
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Any node with this name, whatever its kind.
+    pub fn by_name(&self, name: &str) -> Option<Node> {
+        let conn = self.db.lock();
+        conn.query_row(&format!("SELECT {NODE_COLS} FROM mem_nodes WHERE norm = ?1 ORDER BY mentions DESC LIMIT 1"), params![norm(name)], row_node)
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Insert or refresh a node. Names are unique across kinds: if a node with
+    /// this name already exists (under any kind) it is reused — its kind wins —
+    /// with `mentions` bumped and a non-empty summary/path replacing the old.
+    /// A kind of `category` can only come from `seed_categories`.
     pub fn upsert_node(&self, kind: &str, name: &str, summary: &str, path: &str) -> Node {
         let name = name.trim();
-        let id = node_id(kind, name);
         let now = Utc::now().to_rfc3339();
+        if let Some(existing) = self.by_name(name) {
+            {
+                let conn = self.db.lock();
+                let _ = conn.execute(
+                    "UPDATE mem_nodes SET mentions = mentions + 1,
+                       summary = CASE WHEN ?2 != '' THEN ?2 ELSE summary END,
+                       path = CASE WHEN ?3 != '' THEN ?3 ELSE path END,
+                       updated = ?4 WHERE id = ?1",
+                    params![existing.id, summary.trim(), path, now],
+                );
+            }
+            return self.get(&existing.id).unwrap_or(existing);
+        }
+        let id = node_id(kind, name);
         {
             let conn = self.db.lock();
             let _ = conn.execute(
                 "INSERT INTO mem_nodes (id, kind, name, norm, summary, path, mentions, created, updated)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)
-                 ON CONFLICT(kind, norm) DO UPDATE SET
-                   mentions = mem_nodes.mentions + 1,
-                   summary = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE mem_nodes.summary END,
-                   path = CASE WHEN excluded.path != '' THEN excluded.path ELSE mem_nodes.path END,
-                   updated = excluded.updated",
+                 ON CONFLICT(id) DO UPDATE SET mentions = mem_nodes.mentions + 1, updated = excluded.updated",
                 params![id, norm(kind), name, norm(name), summary.trim(), path, now],
             );
         }
@@ -240,6 +289,51 @@ impl Memory {
 }
 
 // ---------------------------------------------------------------------------
+// Vault docs in the graph
+// ---------------------------------------------------------------------------
+
+/// Register a vault doc (task or note) in the graph: a node carrying its path,
+/// linked to its category and project nodes, so `recall` can surface it and the
+/// Obsidian graph shows the connection. Idempotent per path.
+pub fn link_vault_doc(kind: &str, doc: &crate::vault::Doc) {
+    let m = global();
+    if m.by_path(&doc.rel).is_some() {
+        return;
+    }
+    let node = m.upsert_node(kind, &doc.title(), "", &doc.rel);
+    let cat = doc.str("category");
+    let cat_node = if cat.is_empty() { None } else { Some(m.upsert_node("category", &cat, "", "")) };
+    if let Some(c) = &cat_node {
+        m.add_edge(&node.id, &c.id, "in category", &doc.rel);
+    }
+    let project = doc.str("project");
+    if !project.is_empty() {
+        let pn = m.upsert_node("project", &project, "", "");
+        m.add_edge(&node.id, &pn.id, "part of", &doc.rel);
+        if let Some(c) = &cat_node {
+            m.add_edge(&pn.id, &c.id, "in category", "");
+        }
+        let _ = crate::vault::mirror_memory_node(&pn, &m.neighbors(&pn.id, 12));
+    }
+    if let Some(c) = &cat_node {
+        let _ = crate::vault::mirror_memory_node(c, &m.neighbors(&c.id, 12));
+    }
+}
+
+/// Startup pass: make sure every task/note file in the vault has a graph node
+/// (covers files created before the graph existed, or after a wipe).
+pub fn index_vault() -> usize {
+    let before = global().node_count();
+    for d in crate::vault::list(crate::vault::TASKS) {
+        link_vault_doc("task", &d);
+    }
+    for d in crate::vault::list(crate::vault::NOTES) {
+        link_vault_doc("note", &d);
+    }
+    (global().node_count() - before).max(0) as usize
+}
+
+// ---------------------------------------------------------------------------
 // Recall (what the agent calls)
 // ---------------------------------------------------------------------------
 
@@ -303,21 +397,26 @@ fn parse_json_loose(text: &str) -> Value {
     Value::Null
 }
 
-const KINDS: &[&str] = &["person", "organization", "project", "place", "topic", "preference", "fact", "event"];
-
 /// Pull entities, relations and durable facts out of one exchange and merge
-/// them into the graph. Runs after the reply was sent; failures only log.
-pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, evidence_id: i64) {
+/// them into the graph. `recorded` lists what the assistant already saved this
+/// turn (tasks, notes, expenses…) so the extractor doesn't restate them as
+/// facts. Runs after the reply was sent; failures only log.
+pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, recorded: &[String], evidence_id: i64) {
+    let categories = crate::vault::categories().iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ");
     let system = format!(
         "You maintain a personal knowledge graph for ONE user from their chat with an assistant. Output ONLY minified JSON — no prose, no code fences: \
          {{\"entities\":[{{\"kind\":\"…\",\"name\":\"…\",\"summary\":\"…\"}}],\"relations\":[{{\"from\":\"name\",\"to\":\"name\",\"rel\":\"…\"}}]}}. \
          kind is one of {}. Capture only what is worth remembering later: people (with role/relationship), organizations, projects, places, recurring topics, \
          the user's stated preferences (kind preference, name = short statement), durable facts about their life (kind fact, name = short statement), and dated events. \
          Summaries are one sentence, factual, in third person about the user (\"Alex is the user's dentist\"). Reuse plain canonical names (\"Sam\", not \"Sam (friend)\"). \
+         FIXED CATEGORIES already exist and must never be emitted as entities: {categories}. Refer to them by name in relations only (e.g. project X \"belongs to\" SageMesh). \
+         A project is narrower than a category (\"SageMesh prototype\" is a project under the SageMesh category; \"SageMesh\" itself is not a project). \
+         Do NOT emit facts or events that merely restate something the assistant already recorded this turn (listed under RECORDED): the task/note/expense file is the record. \
          Skip greetings, transient chatter, and anything the assistant merely displayed (balances, lists). If nothing is worth keeping, output {{\"entities\":[],\"relations\":[]}}.",
         KINDS.join("|")
     );
-    let prompt = format!("USER:\n{}\n\nASSISTANT:\n{}", truncate(user_text, 3000), truncate(assistant_text, 1500));
+    let recorded_block = if recorded.is_empty() { "(nothing)".to_string() } else { recorded.iter().map(|r| format!("- {}", truncate(r, 160))).collect::<Vec<_>>().join("\n") };
+    let prompt = format!("USER:\n{}\n\nASSISTANT:\n{}\n\nRECORDED THIS TURN:\n{}", truncate(user_text, 3000), truncate(assistant_text, 1500), recorded_block);
     let raw = match crate::openrouter::chat(&model(), &system, &prompt).await {
         Ok(r) => r,
         Err(e) => {
@@ -334,11 +433,17 @@ pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, eviden
     let mut ids: BTreeMap<String, String> = BTreeMap::new(); // norm name → id
     for e in v["entities"].as_array().cloned().unwrap_or_default() {
         let kind = e["kind"].as_str().unwrap_or("topic").trim().to_lowercase();
-        let kind = if KINDS.contains(&kind.as_str()) { kind } else { "topic".to_string() };
         let name = e["name"].as_str().unwrap_or("").trim();
-        if name.is_empty() || name.chars().count() > 120 {
+        if name.is_empty() || name.chars().count() > 120 || kind == "category" {
             continue;
         }
+        // Categories are fixed: an entity carrying a category's name (whatever
+        // kind the model chose) resolves to the existing category node.
+        if let Some(existing) = m.by_name(name).filter(|n| n.kind == "category") {
+            ids.insert(norm(name), existing.id.clone());
+            continue;
+        }
+        let kind = if KINDS.contains(&kind.as_str()) { kind } else { "topic".to_string() };
         let node = m.upsert_node(&kind, name, e["summary"].as_str().unwrap_or(""), "");
         ids.insert(norm(name), node.id.clone());
         let _ = crate::vault::mirror_memory_node(&node, &m.neighbors(&node.id, 12));
@@ -346,7 +451,10 @@ pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, eviden
     for r in v["relations"].as_array().cloned().unwrap_or_default() {
         let (Some(a), Some(b)) = (r["from"].as_str(), r["to"].as_str()) else { continue };
         let rel = r["rel"].as_str().unwrap_or("related to").trim();
-        let (Some(src), Some(dst)) = (ids.get(&norm(a)).cloned(), ids.get(&norm(b)).cloned()) else { continue };
+        // Endpoints may be entities from this batch or anything already known
+        // (categories, earlier people/projects, tasks the bot filed).
+        let resolve = |name: &str| ids.get(&norm(name)).cloned().or_else(|| m.by_name(name).map(|n| n.id));
+        let (Some(src), Some(dst)) = (resolve(a), resolve(b)) else { continue };
         m.add_edge(&src, &dst, rel, &evidence);
         for id in [&src, &dst] {
             if let Some(n) = m.get(id) {
@@ -422,8 +530,9 @@ mod tests {
     fn graph_upsert_edges_and_fts_search() {
         let m = fresh();
         let sam = m.upsert_node("person", "Sam", "Sam is the user's climbing partner", "");
-        let sam2 = m.upsert_node("person", "sam", "", "");
-        assert_eq!(sam.id, sam2.id, "case-insensitive dedupe");
+        let sam2 = m.upsert_node("project", "sam", "", "");
+        assert_eq!(sam.id, sam2.id, "case-insensitive dedupe across kinds");
+        assert_eq!(sam2.kind, "person", "first kind wins");
         assert_eq!(sam2.mentions, 2);
         assert_eq!(sam2.summary, "Sam is the user's climbing partner", "empty summary keeps the old one");
         let tri = m.upsert_node("project", "Triathlon", "Half-distance race in August", "");
@@ -439,6 +548,19 @@ mod tests {
         assert_eq!(hits[0].name, "Sam");
         assert!(m.search("triath race", 5).iter().any(|n| n.name == "Triathlon"), "prefix + OR fallback");
         assert!(m.search("zzz", 5).is_empty());
+    }
+
+    #[test]
+    fn categories_are_seeded_and_win() {
+        let m = fresh();
+        m.seed_categories();
+        let cat = m.by_name("SageMesh").expect("seeded");
+        assert_eq!(cat.kind, "category");
+        let again = m.upsert_node("project", "SageMesh", "", "");
+        assert_eq!(again.id, cat.id, "a 'project' called SageMesh is the category");
+        assert_eq!(again.kind, "category");
+        let proto = m.upsert_node("project", "SageMesh prototype", "", "");
+        assert_ne!(proto.id, cat.id);
     }
 
     #[test]

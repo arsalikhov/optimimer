@@ -81,7 +81,12 @@ async fn main() {
             charts::refresh();
             charts::refresh_gantt();
             tokio::spawn(charts::run_gantt_worker());
-            // Memory graph → vault notes; rebuild if the folder was wiped.
+            // Every task/note file gets a graph node; then memory graph → vault
+            // notes, rebuilt if the folder was wiped.
+            let indexed = memory::index_vault();
+            if indexed > 0 {
+                tracing::info!("memory: indexed {indexed} vault file(s)");
+            }
             if vault::memory_mirror_count() == 0 && memory::global().node_count() > 0 {
                 tracing::info!("memory mirror: wrote {} note(s)", memory::mirror_all());
             }

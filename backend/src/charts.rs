@@ -457,8 +457,8 @@ fn mermaid_name(s: &str) -> String {
     if GANTT_KEYWORDS.contains(&first.as_str()) || n.trim_start().starts_with("%%") {
         n = format!("· {}", n.trim_start());
     }
-    if n.len() > 48 {
-        let mut cut = 48;
+    if n.len() > 30 {
+        let mut cut = 30;
         while !n.is_char_boundary(cut) {
             cut -= 1;
         }
@@ -507,10 +507,12 @@ pub fn render_gantt(tasks: &[crate::vault::Doc]) -> String {
         } else {
             ""
         };
-        let section = { let c = d.str("category"); if c.is_empty() { "Uncategorised".to_string() } else { c } };
+        // Section = category, or "Category · Project" when the task has one;
+        // the bar label is just the (shortened) title so it fits the bar.
+        let cat = { let c = d.str("category"); if c.is_empty() { "Uncategorised".to_string() } else { c } };
         let project = d.str("project");
-        let label = if project.is_empty() { title } else { mermaid_name(&format!("[{project}] {}", d.title())) };
-        sections.entry(section).or_default().push(format!("    {label} :{tag}{start}, {end}"));
+        let section = if project.is_empty() { cat } else { format!("{cat} · {project}") };
+        sections.entry(section).or_default().push(format!("    {title} :{tag}{start}, {end}"));
         shown += 1;
     }
 
@@ -587,9 +589,9 @@ mod gantt_tests {
             task("Someday", "todo", &past, "", ""),
         ];
         let md = render_gantt(&docs);
-        assert!(md.contains("section Social"), "{md}");
+        assert!(md.contains("section Social · Wedding"), "project in section\n{md}");
         assert!(md.contains("section Admin"), "{md}");
-        assert!(md.contains("[Wedding] Call Sam- venue :"), "project prefix, colon escaped\n{md}");
+        assert!(md.contains("· Call Sam- venue :"), "colon escaped\n{md}");
         assert!(!md.contains("\n    Call Sam"), "no task line may start with a lexer keyword\n{md}");
         assert!(md.contains("Old thing :crit, "), "overdue is crit\n{md}");
         assert!(md.contains("- [ ] Someday"), "undated listed\n{md}");

@@ -271,6 +271,9 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
 
     let mut final_text = String::new();
     let mut shown_any = false;
+    // What tools actually saved this turn — handed to the memory extractor so it
+    // doesn't restate a task/note/expense as a "fact".
+    let mut recorded: Vec<String> = Vec::new();
     for step in 0..AGENT_MAX_STEPS {
         let msg = match crate::openrouter::chat_tools(&agent_model(), &messages, &tools).await {
             Ok(m) => m,
@@ -291,6 +294,9 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
             let cargs: Value = call["function"]["arguments"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| json!({}));
             tracing::info!("agent tool {name} {}", cargs);
             let result = exec_tool(state, chat_id, &name, &cargs).await;
+            if matches!(name.as_str(), "create_task" | "save_note" | "save_memo" | "log_expense" | "log_income" | "set_reminder" | "remember" | "complete_task") {
+                recorded.push(format!("{name}: {}", result.text.lines().next().unwrap_or("")));
+            }
             if let Some(reply) = result.shown {
                 send(client, api, chat_id, &reply).await;
                 shown_any = true;
@@ -309,7 +315,7 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
     let assistant_id = mem.add_message(chat_id, "assistant", &stored);
     let (u, a) = (user_text.to_string(), stored.clone());
     tokio::spawn(async move {
-        memory::extract(chat_id, &u, &a, assistant_id).await;
+        memory::extract(chat_id, &u, &a, &recorded, assistant_id).await;
         memory::maybe_roll_summary(chat_id).await;
     });
     let _ = user_id;
