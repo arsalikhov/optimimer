@@ -253,14 +253,34 @@ pub fn slug(s: &str) -> String {
     if s.is_empty() { "untitled".into() } else { s }
 }
 
-/// `<sub>/<YYYY-MM-DD>-<slug>.md`, suffixed `-2`, `-3`… if taken.
-fn fresh_path(sub: &str, title: &str, date: &str) -> PathBuf {
-    let base = format!("{}-{}", date.get(..10).unwrap_or(date), slug(title));
+/// A file name Obsidian is happy with, kept human-readable: the graph view,
+/// search results and backlinks all label notes by file name, so "Make a spec
+/// sheet.md" beats "2026-09-11-make-a-spec-sheet.md". Strips the characters
+/// Obsidian and common filesystems reject, collapses whitespace, caps length.
+pub fn filename(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.chars() {
+        if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^' | '[' | ']') {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    let collapsed: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut t: String = collapsed.trim_matches(|c: char| c == '.' || c == ' ').chars().take(80).collect();
+    t = t.trim_end().to_string();
+    if t.is_empty() { "Untitled".into() } else { t }
+}
+
+/// `<sub>/<Title>.md`, suffixed " 2", " 3"… if taken. The date lives in
+/// frontmatter (`created`), not the name.
+fn fresh_path(sub: &str, title: &str, _date: &str) -> PathBuf {
+    let base = filename(title);
     let d = dir().join(sub);
     let mut p = d.join(format!("{base}.md"));
     let mut n = 2;
     while p.exists() {
-        p = d.join(format!("{base}-{n}.md"));
+        p = d.join(format!("{base} {n}.md"));
         n += 1;
     }
     p
@@ -611,8 +631,7 @@ fn memory_link(node: &crate::memory::Node) -> String {
     if !node.path.is_empty() {
         return node.path.clone();
     }
-    let slug_part = node.id.split_once(':').map(|(_, s)| s).unwrap_or(&node.id);
-    format!("{MEMORY}/{slug_part}")
+    format!("{MEMORY}/{}", filename(&node.name))
 }
 
 /// Write (or rewrite) the vault note for one memory node: frontmatter with its
@@ -808,7 +827,8 @@ mod tests {
         assert_eq!(read(&found.path).unwrap().str("status"), "done");
         // Same title again gets a -2 suffix rather than clobbering.
         let t2 = write_task(NewTask { title: "Call Sam about the venue".into(), category: String::new(), priority: String::new(), status: String::new(), due: String::new(), due_end: String::new(), project: String::new(), body: String::new() }).unwrap();
-        assert!(t2.rel.ends_with("-2"), "{}", t2.rel);
+        assert!(t2.rel.ends_with("Call Sam about the venue 2"), "{}", t2.rel);
+        assert!(t.rel.ends_with("tasks/Call Sam about the venue"), "{}", t.rel);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -831,6 +851,14 @@ mod tests {
         assert_eq!(clamp_category("Sage"), "SageMesh");
         assert_eq!(clamp_category("chores"), "Personal", "unknown → catch-all");
         assert_eq!(clamp_category(""), "Personal");
+    }
+
+    #[test]
+    fn filenames_are_readable_and_safe() {
+        assert_eq!(filename("Make a spec sheet"), "Make a spec sheet");
+        assert_eq!(filename("Call Sam: venue / budget?"), "Call Sam venue budget");
+        assert_eq!(filename("  ...  "), "Untitled");
+        assert_eq!(filename("#tag [x] a|b"), "tag x a b");
     }
 
     #[test]
