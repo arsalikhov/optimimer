@@ -1,12 +1,16 @@
 mod cache;
+mod charts;
 mod datetime;
 mod db;
 mod engine;
 mod finance;
+mod memory;
 mod models;
-mod notion;
 mod openrouter;
 mod scheduler;
+mod shopper;
+mod vault;
+mod convo;
 mod store;
 mod telegram;
 mod transcribe;
@@ -50,6 +54,46 @@ async fn main() {
     // Cache for expensive deterministic LLM calls (CSV parse, receipt OCR).
     cache::init(db.clone());
 
+    // Transactions ledger (/spent, /earned, /balance, CSV import) — SQLite.
+    finance::init(db.clone());
+
+    // Conversation history + knowledge graph the agent recalls from.
+    memory::init(db.clone());
+
+    // Markdown vault (notes, tasks, summaries) — an Obsidian vault on disk.
+    match vault::init() {
+        Ok(p) => {
+            tracing::info!("vault at {}", p.display());
+            // Ledger mirror for Obsidian Bases: catch up on rows without a note
+            // (first run after an import, or a vault that was wiped) and make
+            // sure the .base views and Home dashboard exist.
+            // FINANCE_PLACEHOLDERS=1 fills an EMPTY ledger with labelled sample
+            // rows so the dashboard renders; they vanish on the first real entry.
+            if std::env::var("FINANCE_PLACEHOLDERS").map(|v| v == "1").unwrap_or(false) && finance::global().all().is_empty() {
+                let today = chrono::Utc::now().date_naive();
+                let n = finance::seed_placeholders(today);
+                tracing::info!("seeded {n} placeholder transactions (FINANCE_PLACEHOLDERS=1)");
+            }
+            let n = vault::backfill_transactions(&finance::global().all());
+            if n > 0 {
+                tracing::info!("finance mirror: wrote {n} transaction note(s)");
+            }
+            charts::refresh();
+            charts::refresh_gantt();
+            tokio::spawn(charts::run_gantt_worker());
+            // Memory graph → vault notes; rebuild if the folder was wiped.
+            if vault::memory_mirror_count() == 0 && memory::global().node_count() > 0 {
+                tracing::info!("memory mirror: wrote {} note(s)", memory::mirror_all());
+            }
+            match vault::ensure_starter_files() {
+                Ok(w) if !w.is_empty() => tracing::info!("wrote vault starter files: {}", w.join(", ")),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("could not write vault starter files: {e}"),
+            }
+        }
+        Err(e) => tracing::error!("cannot create VAULT_DIR: {e}"),
+    }
+
     let store = Store::new(db.clone());
 
     // One-time imports from the legacy JSON stores. Each is a no-op once its
@@ -78,6 +122,14 @@ async fn main() {
         &std::env::var("OPTIMIMER_SCHEDULE_DATA").unwrap_or_else(|_| "schedules.json".to_string()),
     ));
     tokio::spawn(scheduler::run_worker(sched));
+
+    // Shopper: backs /watch — hourly re-checks of product pages, pinging the
+    // chat when something comes back in stock.
+    tokio::spawn(shopper::run_worker(shopper::init(db.clone())));
+
+    // Convo notes: summaries + transcripts of forwarded messages and long voice
+    // memos (index in SQLite; the Markdown copy lands in the vault).
+    convo::init(db.clone());
 
     // Telegram is the primary interface — run the long-polling bot alongside
     // the HTTP API. No-ops with a warning if TELEGRAM_BOT_TOKEN is unset.

@@ -20,7 +20,7 @@ frontend/build/
 backend/workflows.json
 backend/schedules.json
 backend/chat_tz.json
-backend/notion-out/
+backend/vault/
 
 # local Infisical project config (workspace id) — not for the repo
 .infisical.json
@@ -29,3 +29,6 @@ backend/notion-out/
 *.db
 *.db-shm
 *.db-wal
+
+# python
+__pycache__/

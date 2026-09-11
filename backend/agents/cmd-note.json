@@ -4,59 +4,51 @@
     {
       "id": "trigger_1",
       "type": "trigger",
-      "position": { "x": 40, "y": 200 },
-      "data": { "label": "/note" }
-    },
-    {
-      "id": "q_topics",
-      "type": "notion",
-      "position": { "x": 300, "y": 120 },
-      "data": { "label": "List Topics", "op": "query_database", "database_id": "{{env.TOPICS_DB_ID}}" }
-    },
-    {
-      "id": "q_areas",
-      "type": "notion",
-      "position": { "x": 560, "y": 120 },
-      "data": { "label": "List Areas", "op": "query_database", "database_id": "{{env.AREAS_DB_ID}}" }
+      "position": {
+        "x": 40,
+        "y": 200
+      },
+      "data": {
+        "label": "/note"
+      }
     },
     {
       "id": "classify",
       "type": "llm",
-      "position": { "x": 820, "y": 200 },
+      "position": {
+        "x": 300,
+        "y": 200
+      },
       "data": {
         "label": "Classify note",
         "model": "anthropic/claude-sonnet-4.6",
-        "system": "You file a note into Notion. Output ONLY minified JSON — no prose, no code fences. You are given the note text and the lists of EXISTING Topics and Areas (each {id,title}). Choose which existing Topics and Areas the note relates to; use ONLY ids that appear in the provided lists, and leave the array empty if none clearly apply (do NOT invent ids). Status reflects the note's maturity: a quick capture/idea => \"Inbox\"; a worked-out draft => \"Draft\"; a finished/reference note => \"Final\". Output keys: title (a short, descriptive note title), status (\"Inbox\"|\"Draft\"|\"Final\"), topic_ids (array of Topic ids), area_ids (array of Area ids).",
-        "prompt": "NOTE:\n{{input.text}}\n\nEXISTING TOPICS:\n{{q_topics}}\n\nEXISTING AREAS:\n{{q_areas}}"
-      }
-    },
-    {
-      "id": "create",
-      "type": "notion",
-      "position": { "x": 1120, "y": 200 },
-      "data": {
-        "label": "Create note",
-        "op": "create_page",
-        "database_id": "{{env.NOTES_DB_ID}}",
-        "title": "{{classify.json.title}}",
-        "title_prop": "Name",
-        "content": "{{input.text}}",
-        "properties_json": "{\"Status\":{\"status\":{\"name\":\"{{classify.json.status}}\"}}}",
-        "relations_json": "{\"Topics\":{{classify.json.topic_ids}},\"Areas\":{{classify.json.area_ids}}}"
+        "system": "You file a note into the user's Obsidian vault. Output ONLY minified JSON — no prose, no code fences. You are given the note text, the CATEGORIES list and EXISTING TAGS. Output keys: title (a short, descriptive note title, max 8 words), category (exactly one name from CATEGORIES), status (\"inbox\" for a quick capture/idea, \"draft\" for a worked-out draft, \"final\" for a finished/reference note), tags (array of 1-4 lowercase kebab-case tags; reuse existing tags when they fit, invent a new one only when nothing fits).",
+        "prompt": "NOTE:\n{{input.text}}\n\nCATEGORIES:\n{{input.categories}}\n\nEXISTING TAGS:\n{{input.tags}}"
       }
     },
     {
       "id": "out",
       "type": "output",
-      "position": { "x": 1420, "y": 200 },
-      "data": { "label": "Confirm", "value": "Saved note *{{classify.json.title}}* (Status: {{classify.json.status}})\n{{create.url}}" }
+      "position": {
+        "x": 560,
+        "y": 200
+      },
+      "data": {
+        "label": "Parsed",
+        "value": "{{classify.text}}"
+      }
     }
   ],
   "edges": [
-    { "id": "e1", "source": "trigger_1", "target": "q_topics" },
-    { "id": "e2", "source": "q_topics", "target": "q_areas" },
-    { "id": "e3", "source": "q_areas", "target": "classify" },
-    { "id": "e4", "source": "classify", "target": "create" },
-    { "id": "e5", "source": "create", "target": "out" }
+    {
+      "id": "e1",
+      "source": "trigger_1",
+      "target": "classify"
+    },
+    {
+      "id": "e2",
+      "source": "classify",
+      "target": "out"
+    }
   ]
 }

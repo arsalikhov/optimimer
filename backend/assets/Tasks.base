@@ -1,0 +1,127 @@
+# Tasks — views over tasks/ (one note per task, written by /todo). Editing
+# status/priority/due/project here is fine: the bot reads these files.
+filters:
+  and:
+    - 'type == "task"'
+formulas:
+  overdue: 'if(due && status != "done" && due < today(), "⚠️ overdue", "")'
+  due_label: 'if(due, due.format("ddd MMM D HH:mm"), "")'
+properties:
+  title:
+    displayName: Task
+  status:
+    displayName: Status
+  priority:
+    displayName: Priority
+  due:
+    displayName: Due
+  category:
+    displayName: Category
+  project:
+    displayName: Project
+  completed:
+    displayName: Completed
+  formula.overdue:
+    displayName: ""
+views:
+  - type: table
+    name: Open
+    filters:
+      and:
+        - 'status != "done"'
+    order:
+      - title
+      - category
+      - project
+      - priority
+      - due
+      - formula.overdue
+    sort:
+      - property: due
+        direction: ASC
+      - property: priority
+        direction: ASC
+  - type: table
+    name: By category
+    filters:
+      and:
+        - 'status != "done"'
+    groupBy:
+      property: category
+      direction: ASC
+    order:
+      - title
+      - project
+      - priority
+      - due
+    sort:
+      - property: due
+        direction: ASC
+  - type: table
+    name: Today
+    filters:
+      and:
+        - 'status != "done"'
+        - 'due && due.date() <= today()'
+    order:
+      - title
+      - category
+      - priority
+      - due
+    sort:
+      - property: due
+        direction: ASC
+  - type: table
+    name: This week
+    filters:
+      and:
+        - 'status != "done"'
+        - 'due && due < today() + "7d"'
+    order:
+      - title
+      - due
+      - priority
+      - project
+    sort:
+      - property: due
+        direction: ASC
+  - type: table
+    name: By project
+    filters:
+      and:
+        - 'status != "done"'
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - title
+      - priority
+      - due
+    sort:
+      - property: due
+        direction: ASC
+  - type: kanban
+    name: Board
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - title
+      - priority
+      - due
+      - project
+    sort:
+      - property: due
+        direction: ASC
+  - type: table
+    name: Done
+    filters:
+      and:
+        - 'status == "done"'
+    order:
+      - title
+      - completed
+      - project
+    sort:
+      - property: completed
+        direction: DESC

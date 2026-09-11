@@ -15,8 +15,7 @@ A Lindy.ai-style AI agent builder. Design agents on a visual flow canvas, then r
 | 🧠 AI Step  | Calls an LLM via OpenRouter. Reference earlier nodes with `{{nodeId.text}}`. |
 | 🌐 HTTP     | Calls an external API. URL/body support `{{templating}}`.                  |
 | 🔀 Condition | Branches the flow down the `true` / `false` handle.                        |
-| 🗒️ Notion   | Query / create / update Notion pages (or save to disk when Notion is unset). |
-| ⏰ Schedule  | Fire a Telegram ping and/or a Notion update at a future time.               |
+| ⏰ Schedule  | Send a Telegram message at a future time.                                  |
 | 📤 Output   | Final result of a run (what Telegram replies with).                        |
 
 Any string field supports `{{input}}`, `{{input.field}}`, `{{nodeId}}`, `{{nodeId.field}}` interpolation.
@@ -55,7 +54,7 @@ bun run dev:secure                                       # = infisical run --env
 
 `backend/.env.example` is the reference list of every key the app understands.
 
-The core keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, and (optional) `NOTION_TOKEN`.
+The core keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, and `VAULT_DIR` (where the Markdown files go).
 
 ### Security — who can use the bot
 
@@ -66,18 +65,45 @@ var. The HTTP API also binds to `127.0.0.1` by default (override with `OPTIMIMER
 your LAN; reach the web UI over an SSH tunnel if you need it remotely. Transport to Telegram is TLS, but bot chats
 are not end-to-end encrypted (Telegram's servers see message content — inherent to the Bot API).
 
-Finance commands write to a Notion **Finances** database (`FINANCES_DB_ID`); `RENT_AMOUNTS` (comma-separated exact
-amounts, off by default) enables the rent-detection rule. See `backend/.env.example` for every key the app understands.
+Finance commands write to a `transactions` table in the SQLite db; `RENT_AMOUNTS` (comma-separated exact amounts,
+off by default) enables the rent-detection rule. See `backend/.env.example` for every key the app understands.
 
-**Notion is optional.** With `NOTION_TOKEN` unset, the app skips Notion entirely and instead writes each
-"save" action to a JSON file on disk (under `OPTIMIMER_NOTION_FALLBACK_DIR`, default `notion-out/` in the
-working dir — e.g. `/opt/optimimer/notion-out/` on a Pi). So you get a working capture bot with zero Notion
-setup; add the token later to sync to a real database.
+### The vault — notes, tasks and summaries as Markdown
 
-The bundled `/notion`-style command agents target one Notion "Tasks" database — that's the author's own
-setup, kept as a worked example. Adapt the property names in `agents/*.json` and the `CATEGORY_A` /
-`CATEGORY_B` labels to your own life (e.g. `CATEGORY_A=Work`, `CATEGORY_B=Home`). See `backend/.env.example`
-for the full list and the example schema.
+Tasks, notes and the conversation summaries are written as `.md` files with YAML frontmatter under `VAULT_DIR`
+(`notes/`, `tasks/`, `summaries/`). The folder is meant to be an **Obsidian** vault: point `VAULT_DIR` at the folder
+Obsidian Sync (or Syncthing) keeps on the Pi and every capture shows up on all your devices a moment later. Every
+property the bot writes (`type`, `status`, `priority`, `due`, `project`, `tags`, `created`, …) is plain frontmatter,
+so Obsidian **Bases** can filter, sort and group them — "open tasks by project", "notes tagged x" — without
+plugins. Completing a task flips its `status` to `done`; listing and searching read the same files, so edits you
+make in Obsidian are what the bot sees. There is no cloud dependency: the bot only ever touches local files.
+
+Every task and note carries a **`category`** from a fixed list (default: Admin, SageMesh, AquSense, Fitness, Home,
+Finance, Learning, Social, Travel, Personal; override with `VAULT_CATEGORIES`) and an optional **`project`** nested
+under it (Fitness → Triathlon). The parsers pick both; the bases group by category and the Gantt uses categories as
+sections with the project as a prefix.
+
+To get the vault onto your other devices without running the desktop app on the Pi, use **Obsidian Headless**
+(`npm install -g obsidian-headless`, needs Node 22+): `ob login`, `ob sync-setup --vault "<remote vault>" --path
+/opt/optimimer/vault`, then run `ob sync --continuous` as a service — `deploy/obsidian-sync.service` is a ready unit.
+It uses your Obsidian Sync subscription and the same end-to-end encryption as the app.
+
+**Finances in Obsidian.** Every ledger row is mirrored as a small note in `finance/` (`type: transaction`, `date`,
+`amount`, `direction`, `category`, `source`, `flagged`), and the bot drops a `Finances.base` into the vault root on
+first run with views for this month, by month (income / spent / net sums), spending by category, transfers and
+flagged duplicates. SQLite stays the source of truth: the mirror is rebuilt on start for any missing rows, and
+deleting a transaction removes the note too, but edits made to those notes in Obsidian do not flow back.
+Set `FINANCE_PLACEHOLDERS=1` to seed an empty ledger with labelled sample rows ("Sample · …", source
+`Placeholder`) for the last three months so every view renders; they are purged the moment a real expense, receipt
+or CSV row arrives.
+
+**Starter views.** On first run the bot also drops `Tasks.base`, `Notes.base`, `Summaries.base` and a `Home.md`
+dashboard (which embeds one view from each with `![[Tasks.base#Today]]`-style embeds) into the vault root. They are
+written only if missing, so edit them freely. The Tasks "Board" kanban view needs Obsidian 1.14+.
+
+**Charts.** With the community **Charts** plugin installed, `Charts.md` (regenerated by the bot after every ledger
+change) shows income vs spending and net by month, spending by category for the latest month with data, a stacked
+category trend over six months, and daily spend for the last 30 days. `Home.md` embeds the first two.
 
 ## Run it (development)
 
@@ -122,7 +148,7 @@ make deploy PI=pi@<your-pi-ip>
 
 That cross-compiles a fresh binary if you have a Rust toolchain (otherwise it ships the prebuilt one),
 copies it plus `agents/` to `/opt/optimimer`, then runs an **interactive installer over SSH** that asks for
-your **timezone, Telegram bot token, and OpenRouter API key** (Notion token and category labels optional),
+your **timezone, Telegram bot token, and OpenRouter API key** (vault folder and category labels optional),
 writes a private `optimimer.env` (chmod 600), and installs a systemd service that auto-starts on boot and
 restarts on crash. The bot is long-polling, so **no ports are opened** on the Pi.
 
@@ -145,8 +171,8 @@ Other Makefile targets: `make logs PI=…` (follow logs), `make restart PI=…`,
 `ssh -t pi@<ip> /opt/optimimer/install.sh`.
 
 **Secrets without typing them.** The installer auto-detects any of `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_ALLOWED_CHAT_IDS`, `OPENROUTER_API_KEY`, `NOTION_TOKEN`, `DEFAULT_TZ`, `CATEGORY_A`, `CATEGORY_B`,
-`FINANCES_DB_ID`, `RENT_AMOUNTS` (and the other Notion database ids) already present in its environment and skips
+`TELEGRAM_ALLOWED_CHAT_IDS`, `OPENROUTER_API_KEY`, `DEFAULT_TZ`, `CATEGORY_A`, `CATEGORY_B`, `VAULT_DIR`,
+`RENT_AMOUNTS` already present in its environment and skips
 prompting for those. Two ways to feed them:
 
 - **From your laptop's Infisical (the Pi needs no infisical CLI):** pass `INFISICAL_ENV` and `make` exports
@@ -177,44 +203,51 @@ wins.
    refuses everyone else.
 3. Restart the backend. You'll see `Telegram bot started (long polling)`.
 
-**You don't have to use slash commands.** Just type (or speak) what you want in plain language — "remind me to call
-Sam at 4pm", "spent 20 on lunch", "what's my balance", "add milk to my list" — and a small router agent
-(`agents/cmd-route.json`, Haiku) classifies it and runs the matching command in the background. The slash commands
-below are still wired up and run the exact same agents; natural language is just a front door to them. (An agent you
-pick with `/use` takes over plain text, so the router stays out of the way while you're driving a custom agent.)
+**Just talk to it.** There are no slash commands. Every message (typed or spoken) goes to one tool-calling model
+(`AGENT_MODEL`, default Claude Sonnet 4.6) that acts through tools: create or complete tasks, save notes and memos,
+log money and show balances, manage shopping lists, set reminders, send email, watch stock, wake a machine, set your
+timezone. Anything that shows a table or list (balance, transactions, task lists, search results) is displayed
+directly as a rich message; destructive actions (clearing a list, deleting a transaction) get Yes/Cancel buttons.
 
-**Experimental agent mode.** Set `AGENT_MODE=1` to route plain messages through a tool-calling loop instead: one model
-(`AGENT_MODEL`, default Sonnet) is given the bot's capabilities as function tools and decides which to call — chaining
-several in one message ("log my $20 lunch and add milk to groceries"). Off by default; otherwise plain messages use the
-cheaper single-command router above.
+**It remembers.** Every turn is stored, but the model only sees the last `MEMORY_WINDOW` turns plus a rolling summary
+of everything older, so context never bloats. After each exchange a cheap model (`MEMORY_MODEL`) extracts people,
+projects, places, preferences and facts into a small knowledge graph in SQLite (FTS-indexed nodes plus typed edges),
+and the tasks/notes the bot creates join it too. The agent calls `recall` to look things up on demand, and `remember`
+when you tell it something worth keeping. The graph is mirrored to `memory/` in the vault as wikilinked notes, so it
+shows up in Obsidian's graph view and in `Memory.base`.
 
-The bot also registers a native "/" menu (`setMyCommands`). Most slash commands map to bundled agents in
-`agents/cmd-*.json` (re-seeded from disk on every start, so edit the JSON to change behaviour); a few are handled
-directly in the bot. Multi-word commands use underscores (Telegram only links `[a-z0-9_]`). Built-ins:
+Two bundled workflow agents remain behind tools: `agents/cmd-notify.json` (reminders) and `cmd-email.json`; the
+money and vault parsers (`cmd-spent`, `cmd-earned`, `cmd-todo`, `cmd-note`) turn free text into structured JSON.
 
-- **Agents** — `/agents` list · `/use <id>` pick the active agent, then send any message to run it as `{{input}}`.
-- **Capture** — `/todo` (calendar-synced Notion task) · `/note` · `/complete` · `/notify` (reminder) · `/email`.
-- **Search** — `/search_notes` · `/search_tasks` · `/list_todos` · `/list_notes` (5 newest).
-- **Lists** — `/buy_later` (auto-sorts grocery vs other) · `/groceries` (text) · `/grocery_shopping` (interactive
-  tap-to-check list) · `/clear_groceries` · `/to_buy` · `/clear_to_buy`.
-- **Money** — `/spent` · `/earned` · `/set_income` · `/balance` (a week: `last` / `N`, or a month: `/balance june`).
-- **Timezone** — `/tz <Area/City>` (or share a location pin) so reminders fire at the right local time.
+### Conversation summaries
 
-You can also **send a voice note** (transcribed, then routed to a command), a **receipt photo** (OCR'd into an
-expense), or a **CSV bank statement** (bulk-imported, de-duplicated, AI-categorized). Replies use Telegram's
-rich-message formatting (real tables, links) with a plain-text fallback.
+**Forward a batch of messages** (from any chat) and the bot replies with a title, key points, action items, and the
+full transcript folded into a collapsible block. Add a comment when you forward — Telegram sends it just ahead of the
+messages, and the bot uses it as the brief ("what did we decide about the venue?"). Without a comment, once the batch
+settles the bot asks what it's about; reply with a note or tap *Summarize as-is*. Forwarded voice messages are
+transcribed into the transcript. **A voice memo** of your own is transcribed and summarized the same way instead of
+going to the agent when any of these hold: it opens with "memo" / "note to self" / "voice note", it runs
+`VOICE_MEMO_SECS` (default 45s) or longer. Each summary is
+written to `summaries/` in the vault (an index stays in SQLite so the agent can list them). Tuning: `CONVO_MODEL`,
+`FORWARD_SETTLE_SECS`, `FORWARD_PEEK_SECS`, `FORWARD_NOTE_TTL_SECS`.
 
 ### Finance tracking
 
-`/spent`, `/earned` and CSV imports write to a Notion **Finances** database (`FINANCES_DB_ID`); all money math
-(`/balance`) is done in Rust, not the LLM. CSV import detects the account type (credit-card vs chequing) from the
-filename/header, classifies each row as Expense / Income / Transfer / Refund, de-duplicates by a
-date+amount+payee fingerprint, and never double-counts card payments or salary. Manual `/spent` / `/earned` entries
-are deduped the same way, and a same-amount near-match within a few days is flagged in the transaction's Notion **Note**
-for you to review. Repeat CSV parses and receipt OCRs are cached, so re-importing the same file doesn't re-call the
-model. A few recurring payees are pinned deterministically — rent → Housing (exact amounts from `RENT_AMOUNTS`, off by
-default), NSLSC → Loans, Wealthsimple → Savings (excluded from the net), Amex bill payments → Transfer, ATM
-withdrawals → Cash.
+Logged expenses, income and CSV imports write to the SQLite `transactions` table; all money math (balances) is done in
+Rust, not the LLM. CSV import detects the account type (credit-card vs chequing) from the filename/header, classifies
+each row as Expense / Income / Transfer / Refund, de-duplicates by a date+amount+payee fingerprint, and never
+double-counts card payments or salary. Manually logged entries are deduped the same way, and a same-amount near-match
+within a few days is flagged (⚠️ in the transaction list) for you to review and remove. Repeat CSV
+parses and receipt OCRs are cached, so re-importing the same file doesn't re-call the model. A few recurring payees are
+pinned deterministically — rent → Housing (exact amounts from `RENT_AMOUNTS`, off by default), NSLSC → Loans,
+Wealthsimple → Savings (excluded from the net), Amex bill payments → Transfer, ATM withdrawals → Cash.
+
+### Migrating off Notion
+
+Earlier versions stored everything in Notion. `scripts/notion_export.py` (standard library only) dumps every database
+to JSON plus one Markdown file per page, for archiving. Run it wherever the old `NOTION_TOKEN` and `*_DB_ID` variables
+still live, e.g. on the Pi: `set -a; . /opt/optimimer/optimimer.env; set +a; python3 notion_export.py --out
+/opt/optimimer/notion-archive`.
 
 ## API
 

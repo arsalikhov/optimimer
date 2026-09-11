@@ -14,7 +14,7 @@
       "data": {
         "label": "Parse income",
         "model": "anthropic/claude-sonnet-4.6",
-        "system": "You turn an income description into JSON for a Notion 'Finances' database. Output ONLY minified JSON — no prose, no code fences. Keys: amount (a POSITIVE number, digits only, no currency symbol; if unknown use 0), source (short label for where it came from, e.g. 'Paycheck', 'Refund', 'Freelance'; if unknown use 'Income'), category (EXACTLY 'Salary' if this is regular wages/payroll/pay, otherwise 'Income'), date (YYYY-MM-DD). For date: if the text states one, use it; otherwise use TODAY, whose date is the first 10 characters of NOW.",
+        "system": "You turn an income description into JSON for the transactions ledger. Output ONLY minified JSON — no prose, no code fences. Keys: amount (a POSITIVE number, digits only, no currency symbol; if unknown use 0), source (short label for where it came from, e.g. 'Paycheck', 'Refund', 'Freelance'; if unknown use 'Income'), category (EXACTLY 'Salary' if this is regular wages/payroll/pay, otherwise 'Income'), date (YYYY-MM-DD). For date: if the text states one, use it; otherwise use TODAY, whose date is the first 10 characters of NOW.",
         "prompt": "NOW: {{input.now}}\n\nINCOME:\n{{input.text}}"
       }
     },

@@ -1,0 +1,62 @@
+# Memory — the assistant's knowledge graph (memory/): people, projects, places,
+# topics, preferences, facts, and the tasks/notes it created. Generated notes;
+# edit the summaries if they're wrong, the bot only appends.
+filters:
+  and:
+    - 'type == "memory"'
+properties:
+  title:
+    displayName: Name
+  kind:
+    displayName: Kind
+  mentions:
+    displayName: Mentions
+  updated:
+    displayName: Updated
+views:
+  - type: table
+    name: All
+    order:
+      - title
+      - kind
+      - mentions
+      - updated
+    sort:
+      - property: updated
+        direction: DESC
+  - type: table
+    name: By kind
+    groupBy:
+      property: kind
+      direction: ASC
+    order:
+      - title
+      - mentions
+      - updated
+    sort:
+      - property: mentions
+        direction: DESC
+  - type: cards
+    name: People
+    filters:
+      and:
+        - 'kind == "person"'
+    order:
+      - title
+      - mentions
+      - updated
+    sort:
+      - property: mentions
+        direction: DESC
+  - type: table
+    name: Projects
+    filters:
+      and:
+        - 'kind == "project"'
+    order:
+      - title
+      - mentions
+      - updated
+    sort:
+      - property: updated
+        direction: DESC

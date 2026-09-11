@@ -9,11 +9,10 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// One scheduled action. When `fire_at` (RFC3339, any offset) is reached the
-/// worker sends `message` to `chat_id` via Telegram (if non-empty) and/or patches
-/// the Notion page `page_id` with `properties_json` (if both non-empty).
+/// worker sends `message` to `chat_id` via Telegram.
 ///
-/// This powers `/remind` and `/notify` (Telegram ping at a time) and the
-/// automatic "clear a meeting an hour after it starts" rule (a Notion update).
+/// This powers `/remind` and `/notify` (Telegram ping at a time). Rows saved by
+/// older versions may carry extra fields; serde ignores them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
     pub id: String,
@@ -21,10 +20,6 @@ pub struct Schedule {
     pub chat_id: i64,
     #[serde(default)]
     pub message: String,
-    #[serde(default)]
-    pub page_id: String,
-    #[serde(default)]
-    pub properties_json: String,
     #[serde(default)]
     pub done: bool,
 }
@@ -150,18 +145,6 @@ async fn fire(client: &reqwest::Client, token: &str, entry: &Schedule) {
         let body = json!({ "chat_id": entry.chat_id, "text": entry.message, "parse_mode": "Markdown" });
         if let Err(e) = client.post(&url).json(&body).send().await {
             tracing::warn!("scheduler sendMessage failed: {e}");
-        }
-    }
-
-    if !entry.page_id.trim().is_empty() && !entry.properties_json.trim().is_empty() {
-        let op = crate::notion::Op {
-            op: "update_page".into(),
-            page_id: entry.page_id.clone(),
-            properties_json: entry.properties_json.clone(),
-            ..Default::default()
-        };
-        if let Err(e) = crate::notion::run(op).await {
-            tracing::warn!("scheduler Notion update failed: {e}");
         }
     }
 }

@@ -1,0 +1,135 @@
+# Finances — views over the ledger mirror in finance/ (one note per transaction,
+# written by the Optimimer bot; SQLite is the source of truth, so edit amounts
+# via Telegram, not here). Safe to customise: the bot never overwrites this file.
+filters:
+  and:
+    - 'type == "transaction"'
+formulas:
+  month: 'date.format("YYYY-MM")'
+  signed: 'if(direction == "Income" || direction == "Refund", amount, if(direction == "Transfer", 0, 0 - amount))'
+  spend: 'if(direction == "Expense", amount, if(direction == "Refund", 0 - amount, 0))'
+  income: 'if(direction == "Income", amount, 0)'
+properties:
+  title:
+    displayName: Name
+  date:
+    displayName: Date
+  amount:
+    displayName: Amount
+  direction:
+    displayName: Direction
+  category:
+    displayName: Category
+  source:
+    displayName: Source
+  flagged:
+    displayName: Dup?
+  formula.month:
+    displayName: Month
+  formula.signed:
+    displayName: Net
+  formula.spend:
+    displayName: Spent
+  formula.income:
+    displayName: Income
+views:
+  - type: table
+    name: All
+    order:
+      - date
+      - title
+      - amount
+      - direction
+      - category
+      - source
+      - flagged
+    sort:
+      - property: date
+        direction: DESC
+    summaries:
+      amount: Sum
+  - type: table
+    name: This month
+    filters:
+      and:
+        - 'date.year == today().year'
+        - 'date.month == today().month'
+    groupBy:
+      property: direction
+      direction: ASC
+    order:
+      - date
+      - title
+      - amount
+      - category
+    sort:
+      - property: date
+        direction: DESC
+    summaries:
+      amount: Sum
+  - type: table
+    name: By month
+    groupBy:
+      property: formula.month
+      direction: DESC
+    order:
+      - date
+      - title
+      - direction
+      - category
+      - formula.income
+      - formula.spend
+      - formula.signed
+    sort:
+      - property: date
+        direction: DESC
+    summaries:
+      formula.income: Sum
+      formula.spend: Sum
+      formula.signed: Sum
+  - type: table
+    name: Spending by category
+    filters:
+      and:
+        - 'direction == "Expense" || direction == "Refund"'
+    groupBy:
+      property: category
+      direction: ASC
+    order:
+      - date
+      - title
+      - formula.spend
+    sort:
+      - property: date
+        direction: DESC
+    summaries:
+      formula.spend: Sum
+  - type: table
+    name: Transfers
+    filters:
+      and:
+        - 'direction == "Transfer"'
+    order:
+      - date
+      - title
+      - amount
+      - category
+    sort:
+      - property: date
+        direction: DESC
+    summaries:
+      amount: Sum
+  - type: table
+    name: Flagged duplicates
+    filters:
+      and:
+        - 'flagged == true'
+    order:
+      - date
+      - title
+      - amount
+      - direction
+      - category
+    sort:
+      - property: date
+        direction: DESC

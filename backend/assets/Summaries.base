@@ -1,0 +1,38 @@
+# Summaries — views over summaries/ (forwarded chats and voice memos the bot
+# summarized). kind: forward | voice.
+filters:
+  and:
+    - 'type == "summary"'
+properties:
+  title:
+    displayName: Summary
+  kind:
+    displayName: Kind
+  source:
+    displayName: Source
+  created:
+    displayName: Created
+views:
+  - type: table
+    name: Recent
+    limit: 10
+    order:
+      - title
+      - kind
+      - source
+      - created
+    sort:
+      - property: created
+        direction: DESC
+  - type: table
+    name: All
+    groupBy:
+      property: kind
+      direction: ASC
+    order:
+      - title
+      - source
+      - created
+    sort:
+      - property: created
+        direction: DESC

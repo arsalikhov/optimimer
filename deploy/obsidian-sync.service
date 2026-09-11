@@ -1,0 +1,21 @@
+# Obsidian Headless Sync for the Optimimer vault. Install on the Pi:
+#   sudo cp deploy/obsidian-sync.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# Prereqs (as the service user): Node 22+, `npm install -g obsidian-headless`,
+# `ob login`, then `ob sync-setup --vault "<remote vault>" --path /opt/optimimer/vault`.
+# Then: sudo systemctl enable --now obsidian-sync
+[Unit]
+Description=Obsidian Headless Sync (continuous) for the Optimimer vault
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Environment=HOME=/home/user
+WorkingDirectory=/opt/optimimer/vault
+ExecStart=/usr/local/bin/ob sync --continuous --path /opt/optimimer/vault
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

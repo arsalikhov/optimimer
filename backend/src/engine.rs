@@ -40,7 +40,7 @@ impl Ctx {
 
     fn resolve(&self, expr: &str) -> String {
         // `{{html:expr}}` resolves `expr` then HTML-escapes it, so dynamic values
-        // (e.g. a Notion title containing & or <) are safe inside rich-message HTML.
+        // (e.g. a title containing & or <) are safe inside rich-message HTML.
         if let Some(inner) = expr.strip_prefix("html:") {
             return html_escape(&self.resolve(inner.trim()));
         }
@@ -56,7 +56,7 @@ impl Ctx {
             None => (expr, None),
         };
         // `{{env.NAME}}` reads a process env var — lets agents reference IDs and
-        // secrets (e.g. {{env.LIFEOS_DB_ID}}) without baking them into saved JSON.
+        // secrets (e.g. {{env.RESEND_API_KEY}}) without baking them into saved JSON.
         if head == "env" {
             return rest.and_then(|name| std::env::var(name).ok()).unwrap_or_default();
         }
@@ -262,39 +262,6 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
             Ok((json!({ "pass": pass }), vec![handle.to_string()]))
         }
 
-        "notion" => {
-            // `create_pages` fans out one Notion page per item in an LLM-produced
-            // array, scheduling a clear for any item that carries a `clear_at`.
-            if field("op") == "create_pages" {
-                let cfg = CreatePagesCfg {
-                    items_raw: ctx.interpolate(&field("items_json")),
-                    db: ctx.interpolate(&field("database_id")),
-                    chat_id: ctx.interpolate(&field("chat_id")),
-                    tz: ctx.interpolate(&field("tz")),
-                    title_prop: { let t = field("title_prop"); if t.is_empty() { "Name".into() } else { t } },
-                    date_prop: { let p = field("date_prop"); if p.is_empty() { "Date".into() } else { p } },
-                    default_hour: ctx.interpolate(&field("default_hour")).parse().unwrap_or(9),
-                };
-                return Ok((create_pages(cfg).await?, vec![]));
-            }
-            let op = crate::notion::Op {
-                op: field("op"),
-                query: ctx.interpolate(&field("query")),
-                database_id: ctx.interpolate(&field("database_id")),
-                page_id: ctx.interpolate(&field("page_id")),
-                block_id: ctx.interpolate(&field("block_id")),
-                title: ctx.interpolate(&field("title")),
-                title_prop: field("title_prop"),
-                content: ctx.interpolate(&field("content")),
-                filter_json: ctx.interpolate(&field("filter_json")),
-                sort_json: ctx.interpolate(&field("sort_json")),
-                properties_json: ctx.interpolate(&field("properties_json")),
-                relations_json: ctx.interpolate(&field("relations_json")),
-            };
-            let out = crate::notion::run(op).await?;
-            Ok((out, vec![]))
-        }
-
         "datetime" => {
             // Resolve an LLM "when" token object into RFC3339 — all date math in code.
             let spec: Value = serde_json::from_str(&ctx.interpolate(&field("spec"))).unwrap_or(json!({}));
@@ -308,8 +275,7 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
         }
 
         "schedule" => {
-            // Register a future action (Telegram ping and/or Notion update) with
-            // the global scheduler. An empty `fire_at` is a no-op, so the node can
+            // Register a future Telegram ping with the global scheduler. An empty `fire_at` is a no-op, so the node can
             // sit on a path that only sometimes needs scheduling (e.g. meetings).
             let fire_at = ctx.interpolate(&field("fire_at"));
             if fire_at.trim().is_empty() {
@@ -320,8 +286,6 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
                 fire_at: fire_at.trim().to_string(),
                 chat_id: ctx.interpolate(&field("chat_id")).parse().unwrap_or(0),
                 message: ctx.interpolate(&field("message")),
-                page_id: ctx.interpolate(&field("page_id")),
-                properties_json: ctx.interpolate(&field("properties_json")),
                 done: false,
             };
             let id = crate::scheduler::global().add(entry);
@@ -336,75 +300,6 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
 
         other => Err(anyhow::anyhow!("unknown node type: {}", other)),
     }
-}
-
-struct CreatePagesCfg {
-    items_raw: String,
-    db: String,
-    chat_id: String,
-    tz: String,
-    title_prop: String,
-    date_prop: String,
-    default_hour: u32,
-}
-
-/// Create one Notion page per item in `items_json` (a JSON array of
-/// `{title, properties, notes, when, duration_minutes}`). The item's `when` token
-/// object is resolved in code into the `date_prop` date (start, plus end when the
-/// item's Type is "Meeting"); meetings also schedule a clear (check ` Complete` +
-/// Status=Done) one hour after they start. Returns `{count, results, summary}`.
-async fn create_pages(cfg: CreatePagesCfg) -> anyhow::Result<Value> {
-    const CLEAR_PROPS: &str = "{\" Complete\":{\"checkbox\":true},\"Status\":{\"status\":{\"name\":\"Done\"}}}";
-    let items: Vec<Value> = serde_json::from_str(&cfg.items_raw).unwrap_or_default();
-    let mut results = Vec::new();
-    for it in &items {
-        let mut props = it.get("properties").cloned().unwrap_or_else(|| json!({}));
-        let is_meeting = props.pointer("/Type/select/name").and_then(|v| v.as_str()) == Some("Meeting");
-        let duration = it.get("duration_minutes").and_then(|v| v.as_i64()).unwrap_or(if is_meeting { 60 } else { 0 });
-        let resolved = it
-            .get("when")
-            .filter(|w| w.is_object())
-            .and_then(|w| crate::datetime::resolve(w, &cfg.tz, cfg.default_hour, duration));
-
-        if let Some(r) = &resolved {
-            if !r.start.is_empty() {
-                props[&cfg.date_prop] = if is_meeting {
-                    json!({ "date": { "start": r.start, "end": r.end } })
-                } else {
-                    json!({ "date": { "start": r.start } })
-                };
-            }
-        }
-
-        let op = crate::notion::Op {
-            op: "create_page".into(),
-            database_id: cfg.db.clone(),
-            title: it.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            title_prop: cfg.title_prop.clone(),
-            content: it.get("notes").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            properties_json: props.to_string(),
-            ..Default::default()
-        };
-        let created = crate::notion::run(op).await?;
-        if let (true, Some(r), Some(id)) = (is_meeting, &resolved, created.get("id").and_then(|v| v.as_str())) {
-            crate::scheduler::global().add(crate::scheduler::Schedule {
-                id: String::new(),
-                fire_at: r.clear.clone(),
-                chat_id: cfg.chat_id.parse().unwrap_or(0),
-                message: String::new(),
-                page_id: id.to_string(),
-                properties_json: CLEAR_PROPS.to_string(),
-                done: false,
-            });
-        }
-        results.push(created);
-    }
-    let summary = results
-        .iter()
-        .map(|r| format!("• {} {}", r.get("title").and_then(|v| v.as_str()).unwrap_or("item"), r.get("url").and_then(|v| v.as_str()).unwrap_or("")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(json!({ "count": results.len(), "results": results, "summary": summary.trim_end() }))
 }
 
 /// Best-effort parse of LLM output into JSON. Strips a leading/trailing Markdown

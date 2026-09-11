@@ -14,7 +14,6 @@
     if (kind === 'llm') return (data?.model as string) ?? '';
     if (kind === 'http') return `${data?.method ?? 'GET'} ${(data?.url as string) ?? ''}`;
     if (kind === 'condition') return `${data?.left ?? ''} ${data?.op ?? ''} ${data?.right ?? ''}`;
-    if (kind === 'notion') return `Notion · ${data?.op ?? 'search'}`;
     return def.hint;
   });
 </script>

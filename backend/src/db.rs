@@ -77,6 +77,78 @@ fn init_schema(conn: &Connection) -> Result<()> {
              json TEXT NOT NULL,
              done INTEGER NOT NULL DEFAULT 0
          );
+         CREATE TABLE IF NOT EXISTS stock_watches (
+             id   TEXT PRIMARY KEY,
+             json TEXT NOT NULL,
+             done INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS transactions (
+             id        TEXT PRIMARY KEY,
+             date      TEXT NOT NULL,
+             name      TEXT NOT NULL,
+             amount    REAL NOT NULL,
+             direction TEXT NOT NULL,
+             category  TEXT NOT NULL DEFAULT '',
+             source    TEXT NOT NULL DEFAULT '',
+             key       TEXT NOT NULL DEFAULT '',
+             note      TEXT NOT NULL DEFAULT '',
+             created   TEXT NOT NULL DEFAULT ''
+         );
+         CREATE INDEX IF NOT EXISTS transactions_date ON transactions(date);
+         CREATE INDEX IF NOT EXISTS transactions_key ON transactions(key);
+         CREATE TABLE IF NOT EXISTS chat_messages (
+             id      INTEGER PRIMARY KEY AUTOINCREMENT,
+             chat_id INTEGER NOT NULL,
+             role    TEXT NOT NULL,
+             text    TEXT NOT NULL,
+             created TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
+         CREATE TABLE IF NOT EXISTS chat_summaries (
+             chat_id INTEGER PRIMARY KEY,
+             summary TEXT NOT NULL,
+             upto_id INTEGER NOT NULL,
+             updated TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS mem_nodes (
+             id       TEXT PRIMARY KEY,
+             kind     TEXT NOT NULL,
+             name     TEXT NOT NULL,
+             norm     TEXT NOT NULL,
+             summary  TEXT NOT NULL DEFAULT '',
+             path     TEXT NOT NULL DEFAULT '',
+             mentions INTEGER NOT NULL DEFAULT 1,
+             created  TEXT NOT NULL,
+             updated  TEXT NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS mem_nodes_norm ON mem_nodes(kind, norm);
+         CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(name, summary, content='mem_nodes', content_rowid='rowid');
+         CREATE TRIGGER IF NOT EXISTS mem_nodes_ai AFTER INSERT ON mem_nodes BEGIN
+             INSERT INTO mem_fts(rowid, name, summary) VALUES (new.rowid, new.name, new.summary);
+         END;
+         CREATE TRIGGER IF NOT EXISTS mem_nodes_ad AFTER DELETE ON mem_nodes BEGIN
+             INSERT INTO mem_fts(mem_fts, rowid, name, summary) VALUES ('delete', old.rowid, old.name, old.summary);
+         END;
+         CREATE TRIGGER IF NOT EXISTS mem_nodes_au AFTER UPDATE ON mem_nodes BEGIN
+             INSERT INTO mem_fts(mem_fts, rowid, name, summary) VALUES ('delete', old.rowid, old.name, old.summary);
+             INSERT INTO mem_fts(rowid, name, summary) VALUES (new.rowid, new.name, new.summary);
+         END;
+         CREATE TABLE IF NOT EXISTS mem_edges (
+             id       INTEGER PRIMARY KEY AUTOINCREMENT,
+             src      TEXT NOT NULL,
+             dst      TEXT NOT NULL,
+             rel      TEXT NOT NULL,
+             weight   REAL NOT NULL DEFAULT 1,
+             evidence TEXT NOT NULL DEFAULT '',
+             created  TEXT NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS mem_edges_uniq ON mem_edges(src, dst, rel);
+         CREATE TABLE IF NOT EXISTS convo_notes (
+             id      TEXT PRIMARY KEY,
+             chat_id INTEGER NOT NULL,
+             json    TEXT NOT NULL,
+             created TEXT NOT NULL DEFAULT ''
+         );
          CREATE TABLE IF NOT EXISTS chat_finance (
              chat_id        INTEGER PRIMARY KEY,
              monthly_income REAL NOT NULL DEFAULT 0

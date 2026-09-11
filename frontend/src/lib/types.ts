@@ -1,6 +1,6 @@
 import type { Node, Edge } from '@xyflow/svelte';
 
-export type NodeKind = 'trigger' | 'llm' | 'http' | 'condition' | 'notion' | 'datetime' | 'schedule' | 'output';
+export type NodeKind = 'trigger' | 'llm' | 'http' | 'condition' | 'datetime' | 'schedule' | 'output';
 
 export interface Workflow {
   id: string;
@@ -119,56 +119,6 @@ export const NODE_DEFS: Record<NodeKind, NodeDef> = {
       { key: 'right', label: 'Right value', type: 'text' }
     ]
   },
-  notion: {
-    kind: 'notion',
-    label: 'Notion',
-    icon: '📝',
-    color: '#cbd5e1',
-    hint: 'Search, query a database, create/append pages, or fetch a page in Notion.',
-    defaults: {
-      label: 'Notion',
-      op: 'search',
-      query: '{{input}}',
-      database_id: '',
-      page_id: '',
-      block_id: '',
-      title: '',
-      title_prop: 'Name',
-      content: '',
-      filter_json: '',
-      properties_json: '',
-      relations_json: '',
-      items_json: '',
-      chat_id: '',
-      tz: '',
-      date_prop: 'Date',
-      default_hour: '9'
-    },
-    fields: [
-      { key: 'label', label: 'Name', type: 'text' },
-      {
-        key: 'op',
-        label: 'Action',
-        type: 'select',
-        options: ['search', 'query_database', 'create_page', 'create_pages', 'update_page', 'append', 'get_page']
-      },
-      { key: 'query', label: 'Search query (search)', type: 'text' },
-      { key: 'database_id', label: 'Database ID (query/create)', type: 'text' },
-      { key: 'title', label: 'New page title (create)', type: 'text' },
-      { key: 'title_prop', label: 'Title property name (create)', type: 'text' },
-      { key: 'properties_json', label: 'Properties — JSON object (create/update)', type: 'textarea', placeholder: '{"Category":{"select":{"name":"Sagemesh"}}}' },
-      { key: 'relations_json', label: 'Relations — {"Prop":["page-id",…]} (create)', type: 'textarea', placeholder: '{"Topics":["id1"],"Areas":["id2"]}' },
-      { key: 'content', label: 'Content — one block per line (create/append)', type: 'textarea' },
-      { key: 'page_id', label: 'Page ID (update/get/append)', type: 'text' },
-      { key: 'block_id', label: 'Block/Page ID to append to (append)', type: 'text' },
-      { key: 'filter_json', label: 'Filter JSON — optional (query)', type: 'textarea' },
-      { key: 'items_json', label: 'Items — JSON array of {title,properties,when,duration_minutes,notes} (create_pages)', type: 'textarea' },
-      { key: 'chat_id', label: 'Telegram chat id — for meeting auto-clear (create_pages)', type: 'text' },
-      { key: 'tz', label: 'Timezone — resolves each item’s when (create_pages)', type: 'text' },
-      { key: 'date_prop', label: 'Date property name (create_pages)', type: 'text' },
-      { key: 'default_hour', label: 'Default hour when no time given (create_pages)', type: 'text' }
-    ]
-  },
   datetime: {
     kind: 'datetime',
     label: 'Date/Time',
@@ -189,22 +139,18 @@ export const NODE_DEFS: Record<NodeKind, NodeDef> = {
     label: 'Schedule',
     icon: '⏰',
     color: '#f97316',
-    hint: 'Fires a Telegram ping and/or a Notion update at fire_at (RFC3339). Empty fire_at is a no-op.',
+    hint: 'Sends a Telegram message at fire_at (RFC3339). Empty fire_at is a no-op.',
     defaults: {
       label: 'Schedule',
       fire_at: '',
       chat_id: '{{input.chat_id}}',
-      message: '',
-      page_id: '',
-      properties_json: ''
+      message: ''
     },
     fields: [
       { key: 'label', label: 'Name', type: 'text' },
       { key: 'fire_at', label: 'Fire at (RFC3339)', type: 'text', placeholder: '{{parse.json.fire_at}}' },
       { key: 'chat_id', label: 'Telegram chat id', type: 'text' },
-      { key: 'message', label: 'Telegram message (optional)', type: 'textarea' },
-      { key: 'page_id', label: 'Notion page id to update (optional)', type: 'text' },
-      { key: 'properties_json', label: 'Notion properties to set (optional)', type: 'textarea' }
+      { key: 'message', label: 'Telegram message', type: 'textarea' }
     ]
   },
   output: {

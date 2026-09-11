@@ -1,17 +1,140 @@
 //! Finance feature: weekly balance and CSV statement import.
 //!
 //! Money math is done HERE in Rust (exact), never by an LLM — the LLM only
-//! normalizes/categorizes free-form input. Transactions live in the Notion
-//! "Finances" database (`FINANCES_DB_ID`) with properties: Name(title),
-//! Amount(number), Direction(select Expense|Income), Category(select), Date(date),
-//! Source(select Manual|Receipt|CSV), Key(rich_text dedup fingerprint), Note.
+//! normalizes/categorizes free-form input. Transactions live in the shared
+//! SQLite db (`transactions` table): name, amount, direction
+//! (Expense|Income|Transfer|Refund), category, date, source (Manual|Receipt|CSV),
+//! key (dedup fingerprint) and a free-text note (e.g. a likely-duplicate flag).
 
+use crate::db::Db;
 use anyhow::{anyhow, Result};
-use chrono::{Datelike, Duration, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+
+/// One ledger row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Txn {
+    pub id: String,
+    /// `YYYY-MM-DD`
+    pub date: String,
+    pub name: String,
+    /// Always positive; `direction` carries the sign's meaning.
+    pub amount: f64,
+    pub direction: String,
+    pub category: String,
+    pub source: String,
+    pub key: String,
+    pub note: String,
+    pub created: String,
+}
+
+/// SQLite-backed ledger, mirroring the other stores.
+#[derive(Clone)]
+pub struct Ledger {
+    db: Db,
+}
+
+static GLOBAL: OnceLock<Ledger> = OnceLock::new();
+
+pub fn init(db: Db) -> Ledger {
+    let l = Ledger { db };
+    let _ = GLOBAL.set(l.clone());
+    l
+}
+
+pub fn global() -> Ledger {
+    GLOBAL
+        .get_or_init(|| Ledger { db: Db::memory().expect("in-memory ledger") })
+        .clone()
+}
+
+const COLS: &str = "id, date, name, amount, direction, category, source, key, note, created";
+
+fn row_to_txn(r: &rusqlite::Row) -> rusqlite::Result<Txn> {
+    Ok(Txn {
+        id: r.get(0)?,
+        date: r.get(1)?,
+        name: r.get(2)?,
+        amount: r.get(3)?,
+        direction: r.get(4)?,
+        category: r.get(5)?,
+        source: r.get(6)?,
+        key: r.get(7)?,
+        note: r.get(8)?,
+        created: r.get(9)?,
+    })
+}
+
+impl Ledger {
+    pub fn insert(&self, mut t: Txn) -> Result<Txn> {
+        if t.id.is_empty() {
+            t.id = uuid::Uuid::new_v4().to_string();
+        }
+        if t.created.is_empty() {
+            t.created = Utc::now().to_rfc3339();
+        }
+        let conn = self.db.lock();
+        conn.execute(
+            &format!("INSERT INTO transactions ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
+            params![t.id, t.date, t.name, t.amount, t.direction, t.category, t.source, t.key, t.note, t.created],
+        )?;
+        drop(conn);
+        // Best-effort Markdown mirror for Obsidian Bases; the row is already saved.
+        if let Err(e) = crate::vault::write_transaction(&t) {
+            tracing::warn!("finance mirror write failed: {e}");
+        }
+        Ok(t)
+    }
+
+    fn query(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Vec<Txn> {
+        let conn = self.db.lock();
+        let Ok(mut stmt) = conn.prepare(sql) else { return vec![] };
+        stmt.query_map(p, row_to_txn)
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn all(&self) -> Vec<Txn> {
+        self.query(&format!("SELECT {COLS} FROM transactions ORDER BY date DESC, created DESC"), &[])
+    }
+
+    /// Rows with `start <= date < end`.
+    pub fn in_range(&self, start: NaiveDate, end: NaiveDate) -> Vec<Txn> {
+        let (a, b) = (start.to_string(), end.to_string());
+        self.query(
+            &format!("SELECT {COLS} FROM transactions WHERE date >= ?1 AND date < ?2 ORDER BY date DESC"),
+            &[&a, &b],
+        )
+    }
+
+    pub fn recent(&self, limit: usize) -> Vec<Txn> {
+        let n = limit as i64;
+        self.query(&format!("SELECT {COLS} FROM transactions ORDER BY date DESC, created DESC LIMIT ?1"), &[&n])
+    }
+
+    pub fn has_key(&self, key: &str) -> bool {
+        !self.query(&format!("SELECT {COLS} FROM transactions WHERE key = ?1 LIMIT 1"), &[&key]).is_empty()
+    }
+
+    pub fn delete(&self, id: &str) -> bool {
+        let removed = {
+            let conn = self.db.lock();
+            conn.execute("DELETE FROM transactions WHERE id = ?1", params![id]).map(|n| n > 0).unwrap_or(false)
+        };
+        if removed {
+            if let Err(e) = crate::vault::remove_transaction(id) {
+                tracing::warn!("finance mirror delete failed: {e}");
+            }
+        }
+        removed
+    }
+}
 
 /// Expense categories the LLM must choose from (income rows are categorized "Income").
 const CATEGORY_LIST: &[&str] = &[
@@ -22,7 +145,7 @@ const CATEGORIES: &str =
     "Groceries, Dining, Transport, Housing, Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Loans, Cash, Other";
 
 /// Snap an LLM-returned category onto the known set (case-insensitive), falling
-/// back to "Other". Stops the model from inventing junk Notion select options
+/// back to "Other". Stops the model from inventing junk categories
 /// (e.g. "Restaurants") or guessing a category from a street name.
 fn clamp_category(c: &str) -> String {
     let c = c.trim();
@@ -33,13 +156,25 @@ fn clamp_category(c: &str) -> String {
         .unwrap_or_else(|| "Other".to_string())
 }
 
+/// Sub-types of a Transfer row. Card payments settle spending that is already
+/// counted as expenses, so money-flow views drop them; the other three are real
+/// movements of cash into or out of the accounts being tracked.
+pub const TRANSFER_KINDS: &[&str] = &["Card payment", "Savings", "Transfer in", "Transfer out"];
+
+/// Snap an LLM transfer category onto `TRANSFER_KINDS`; unknown/legacy values
+/// (e.g. the old catch-all "Transfer") are treated as card payments.
+fn clamp_transfer(c: &str) -> String {
+    let c = c.trim();
+    TRANSFER_KINDS
+        .iter()
+        .find(|k| k.eq_ignore_ascii_case(c))
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| "Card payment".to_string())
+}
+
 /// A weeks-per-month divisor: 365.25 / 12 / 7 ≈ 4.348. Used to slice a monthly
 /// salary into a comparable weekly figure for the balance view.
 const WEEKS_PER_MONTH: f64 = 4.348;
-
-fn db_id() -> String {
-    std::env::var("FINANCES_DB_ID").unwrap_or_default()
-}
 
 /// Exact e-transfer amounts that mean "rent" → forced to a Housing expense (rent
 /// is paid by Interac e-transfer, so it otherwise looks like a generic transfer).
@@ -81,21 +216,6 @@ fn is_card_payment(desc: &str) -> bool {
     lc.contains("amex") && (lc.contains("pymt") || lc.contains("payment") || lc.contains("bill") || lc.contains("ftd"))
 }
 
-// ---- Notion property extractors ---------------------------------------------
-
-fn prop_number(props: &Value, key: &str) -> f64 {
-    props[key]["number"].as_f64().unwrap_or(0.0)
-}
-fn prop_select(props: &Value, key: &str) -> String {
-    props[key]["select"]["name"].as_str().unwrap_or("").to_string()
-}
-fn prop_rich(props: &Value, key: &str) -> String {
-    props[key]["rich_text"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|t| t["plain_text"].as_str()).collect::<String>())
-        .unwrap_or_default()
-}
-
 /// Stable dedup fingerprint for a transaction: date | amount(cents) | description.
 /// Re-importing the same statement row yields the same Key, so we skip it.
 fn fingerprint(date: &str, amount: f64, desc: &str) -> String {
@@ -118,20 +238,12 @@ fn days_apart(a: &str, b: &str) -> Option<i64> {
     Some((pa - pb).num_days().abs())
 }
 
-/// Reduce existing Finances pages to `(amount_cents, date, direction)` for the
+/// Reduce existing rows to `(amount_cents, date, direction)` for the
 /// "same amount, different fingerprint" near-duplicate check.
-fn dup_index(pages: &[Value]) -> Vec<(i64, String, String)> {
-    pages
-        .iter()
-        .filter_map(|p| {
-            let props = &p["properties"];
-            let date = props["Date"]["date"]["start"].as_str().unwrap_or("").to_string();
-            if date.is_empty() {
-                return None;
-            }
-            let cents = (prop_number(props, "Amount").abs() * 100.0).round() as i64;
-            Some((cents, date, prop_select(props, "Direction")))
-        })
+fn dup_index(txns: &[Txn]) -> Vec<(i64, String, String)> {
+    txns.iter()
+        .filter(|t| !t.date.is_empty())
+        .map(|t| ((t.amount.abs() * 100.0).round() as i64, t.date.clone(), t.direction.clone()))
         .collect()
 }
 
@@ -219,11 +331,7 @@ pub async fn weekly_balance(
     };
     // Always bound both ends so a future-dated row (clock skew, post-dated txn)
     // can't leak into the current week.
-    let filter = json!({ "and": [
-        { "property": "Date", "date": { "on_or_after": monday.to_string() } },
-        { "property": "Date", "date": { "before": next_monday.to_string() } }
-    ]});
-    period_balance(filter, title, range, monthly_income / WEEKS_PER_MONTH, monthly_income).await
+    period_balance(monday, next_monday, title, range, monthly_income / WEEKS_PER_MONTH, monthly_income).await
 }
 
 /// Monthly balance for a specific calendar month. The salary budget is the full
@@ -241,24 +349,21 @@ pub async fn monthly_balance(
 
     let title = format!("{} {year}", MONTH_NAMES[(month - 1) as usize]);
     let range = format!("{} – {}", start, end - Duration::days(1));
-    let filter = json!({ "and": [
-        { "property": "Date", "date": { "on_or_after": start.to_string() } },
-        { "property": "Date", "date": { "before": end.to_string() } }
-    ]});
-    period_balance(filter, title, range, monthly_income, monthly_income).await
+    period_balance(start, end, title, range, monthly_income, monthly_income).await
 }
 
 /// Shared balance core: query the period, tally income/expenses/refunds/transfers,
 /// render rich HTML + a plain fallback. `salary_budget` is the budgeted salary for
 /// the period (a weekly slice or a whole month).
 async fn period_balance(
-    filter: Value,
+    start: NaiveDate,
+    end: NaiveDate,
     title: String,
     range: String,
     salary_budget: f64,
     monthly_income: f64,
 ) -> Result<(String, String)> {
-    let pages = crate::notion::query_raw(&db_id(), Some(filter), None).await?;
+    let txns = global().in_range(start, end);
 
     let mut salary_logged = 0.0;
     let mut other_income = 0.0;
@@ -266,14 +371,13 @@ async fn period_balance(
     let mut refund_total = 0.0;
     let mut savings_total = 0.0;
     let mut by_cat: Vec<(String, f64)> = Vec::new();
-    for p in &pages {
-        let props = &p["properties"];
-        let amount = prop_number(props, "Amount").abs();
-        match prop_select(props, "Direction").as_str() {
+    for t in &txns {
+        let amount = t.amount.abs();
+        match t.direction.as_str() {
             "Income" => {
                 // Salary is tracked separately so it's never double-counted against
                 // the monthly-income slice (see below). Everything else is "other".
-                if prop_select(props, "Category").eq_ignore_ascii_case("Salary") {
+                if t.category.eq_ignore_ascii_case("Salary") {
                     salary_logged += amount;
                 } else {
                     other_income += amount;
@@ -282,7 +386,7 @@ async fn period_balance(
             // Card payments / inter-account moves: not income, not spending. A
             // savings transfer is still excluded from net but tracked as a memo.
             "Transfer" => {
-                if prop_select(props, "Category").eq_ignore_ascii_case("Savings") {
+                if t.category.eq_ignore_ascii_case("Savings") {
                     savings_total += amount;
                 }
             }
@@ -290,10 +394,7 @@ async fn period_balance(
             "Refund" => refund_total += amount,
             _ => {
                 expense_total += amount;
-                let cat = {
-                    let c = prop_select(props, "Category");
-                    if c.is_empty() { "Other".to_string() } else { c }
-                };
+                let cat = if t.category.is_empty() { "Other".to_string() } else { t.category.clone() };
                 match by_cat.iter_mut().find(|(k, _)| *k == cat) {
                     Some(e) => e.1 += amount,
                     None => by_cat.push((cat, amount)),
@@ -444,12 +545,15 @@ pub struct ImportSummary {
 }
 
 /// Import a bank/credit-card CSV: LLM normalizes + categorizes every row, then we
-/// create one Finances page per row — SKIPPING any whose fingerprint already
+/// insert one ledger row per CSV row — SKIPPING any whose fingerprint already
 /// exists in the DB, so re-importing the same (or overlapping) statement adds
 /// nothing. `account_hint` ("credit" / "chequing" / "") tells the normalizer how
 /// to read a credit: a card payment (Transfer) vs real income.
 pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<ImportSummary> {
     let rows = normalize_csv(csv, today, account_hint).await?;
+    if !rows.is_empty() {
+        purge_placeholders();
+    }
     let parsed = rows.len();
     if parsed == 0 {
         return Ok(ImportSummary { created: 0, skipped: 0, transfers: 0, flagged: 0, parsed: 0 });
@@ -457,13 +561,9 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
 
     // Existing fingerprints (exact re-import dedup) and an amount/date/direction
     // index (cross-source "likely duplicate" flagging) — both from one fetch.
-    let existing_pages = crate::notion::query_raw(&db_id(), None, None).await?;
-    let mut seen: HashSet<String> = existing_pages
-        .iter()
-        .map(|p| prop_rich(&p["properties"], "Key"))
-        .filter(|k| !k.is_empty())
-        .collect();
-    let prior = dup_index(&existing_pages);
+    let existing = global().all();
+    let mut seen: HashSet<String> = existing.iter().map(|t| t.key.clone()).filter(|k| !k.is_empty()).collect();
+    let prior = dup_index(&existing);
 
     let mut created = 0;
     let mut skipped = 0;
@@ -493,9 +593,9 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
             "Income" => {
                 if r.category.eq_ignore_ascii_case("Salary") { "Salary".to_string() } else { "Income".to_string() }
             }
-            "Transfer" => "Transfer".to_string(),
+            "Transfer" => clamp_transfer(&r.category),
             // Refund/Expense: snap to a known category so the model can't spawn
-            // junk Notion options or guess a category from an ATM's street name.
+            // junk categories or guess a category from an ATM's street name.
             _ => clamp_category(&r.category),
         };
         // Deterministic overrides for known recurring payees the model otherwise
@@ -507,7 +607,7 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
         } else if is_savings(&r.description) {
             ("Transfer", "Savings".to_string())
         } else if is_card_payment(&r.description) {
-            ("Transfer", "Transfer".to_string())
+            ("Transfer", "Card payment".to_string())
         } else {
             (direction, category)
         };
@@ -516,30 +616,22 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
         // amount + direction matches an existing transaction within a few days
         // (e.g. the bank's version of something you already logged by hand, or an
         // overlapping statement with a reworded description). Import it anyway,
-        // but stamp a Note so you can eyeball it in Notion and delete if redundant.
+        // but stamp a note so you can eyeball it in /transactions and remove it.
         let row_cents = (r.amount.abs() * 100.0).round() as i64;
         let note = likely_dup_note(&prior, row_cents, direction, &date);
 
-        let mut props = json!({
-            "Amount": { "number": r.amount.abs() },
-            "Direction": { "select": { "name": direction } },
-            "Category": { "select": { "name": category } },
-            "Date": { "date": { "start": date } },
-            "Source": { "select": { "name": "CSV" } },
-            "Key": { "rich_text": [{ "text": { "content": key } }] },
-        });
-        if let Some(n) = &note {
-            props["Note"] = json!({ "rich_text": [{ "text": { "content": n } }] });
-        }
-        let op = crate::notion::Op {
-            op: "create_page".to_string(),
-            database_id: db_id(),
-            title: if r.description.trim().is_empty() { "Transaction".to_string() } else { r.description.trim().to_string() },
-            title_prop: "Name".to_string(),
-            properties_json: props.to_string(),
+        let txn = Txn {
+            date,
+            name: if r.description.trim().is_empty() { "Transaction".to_string() } else { r.description.trim().to_string() },
+            amount: r.amount.abs(),
+            direction: direction.to_string(),
+            category,
+            source: "CSV".into(),
+            key,
+            note: note.clone().unwrap_or_default(),
             ..Default::default()
         };
-        match crate::notion::run(op).await {
+        match global().insert(txn) {
             Ok(_) => {
                 created += 1;
                 if direction == "Transfer" {
@@ -551,6 +643,9 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
             }
             Err(e) => tracing::warn!("finance import: failed to create row: {e}"),
         }
+    }
+    if created > 0 {
+        crate::charts::refresh();
     }
     Ok(ImportSummary { created, skipped, transfers, flagged, parsed })
 }
@@ -569,7 +664,7 @@ pub struct Logged {
     pub text: String,
 }
 
-/// Create a hand-logged transaction from the parse agent's JSON
+/// Insert a hand-logged transaction from the parse agent's JSON
 /// (`{amount, merchant|source, category, date}`), applying the SAME dedup as CSV
 /// import so manual and imported rows can't double up:
 ///   • identical fingerprint already in the DB → NOT added again (you double-tapped
@@ -615,40 +710,32 @@ pub async fn log_manual(parsed_json: &str, kind: ManualKind, today: &str) -> Res
     };
 
     let key = fingerprint(&date, amount, &title);
-    let existing = crate::notion::query_raw(&db_id(), None, None).await?;
+    purge_placeholders();
+    let ledger = global();
 
     // Exact fingerprint already present → don't create a second copy.
-    if existing.iter().any(|p| prop_rich(&p["properties"], "Key") == key) {
+    if ledger.has_key(&key) {
         return Ok(Logged {
             html: None,
-            text: format!("Already logged — {title} {} on {date} is already in your Finances DB (same name, amount and date). Not added again.", money(amount)),
+            text: format!("Already logged — {title} {} on {date} is already in the ledger (same name, amount and date). Not added again.", money(amount)),
         });
     }
 
     let cents = (amount * 100.0).round() as i64;
-    let note = likely_dup_note(&dup_index(&existing), cents, direction, &date);
+    let note = likely_dup_note(&dup_index(&ledger.all()), cents, direction, &date);
 
-    let mut props = json!({
-        "Amount": { "number": amount },
-        "Direction": { "select": { "name": direction } },
-        "Category": { "select": { "name": category } },
-        "Date": { "date": { "start": date } },
-        "Source": { "select": { "name": "Manual" } },
-        "Key": { "rich_text": [{ "text": { "content": key } }] },
-    });
-    if let Some(n) = &note {
-        props["Note"] = json!({ "rich_text": [{ "text": { "content": n } }] });
-    }
-    let op = crate::notion::Op {
-        op: "create_page".to_string(),
-        database_id: db_id(),
-        title: title.clone(),
-        title_prop: "Name".to_string(),
-        properties_json: props.to_string(),
+    ledger.insert(Txn {
+        date: date.clone(),
+        name: title.clone(),
+        amount,
+        direction: direction.to_string(),
+        category: category.clone(),
+        source: "Manual".into(),
+        key,
+        note: note.clone().unwrap_or_default(),
         ..Default::default()
-    };
-    let page = crate::notion::run(op).await?;
-    let url = page["url"].as_str().unwrap_or("");
+    })?;
+    crate::charts::refresh();
 
     let esc = crate::engine::html_escape;
     let mut html = format!(
@@ -657,11 +744,8 @@ pub async fn log_manual(parsed_json: &str, kind: ManualKind, today: &str) -> Res
         esc(&title),
         esc(&category),
     );
-    if !url.is_empty() {
-        html.push_str(&format!("\n<a href=\"{}\">Link to Notion page</a>", esc(url)));
-    }
     if note.is_some() {
-        html.push_str("\n<blockquote>⚠️ Possible duplicate of an existing transaction — flagged in its Note so you can review and delete if redundant.</blockquote>");
+        html.push_str("\n<blockquote>⚠️ Possible duplicate of an existing transaction — flagged in its note; see /transactions to review and remove.</blockquote>");
     }
     let text = format!(
         "Logged {noun}: {} — {title} ({category}){}",
@@ -669,6 +753,136 @@ pub async fn log_manual(parsed_json: &str, kind: ManualKind, today: &str) -> Res
         if note.is_some() { " ⚠️ possible duplicate" } else { "" },
     );
     Ok(Logged { html: Some(html), text })
+}
+
+// ---- Placeholder data --------------------------------------------------------
+
+/// Source tag for demo rows seeded into an empty ledger so the dashboard has
+/// something to show. Purged as soon as a real transaction arrives.
+pub const PLACEHOLDER_SOURCE: &str = "Placeholder";
+
+/// Delete every placeholder row (and its vault mirror). Returns the count.
+pub fn purge_placeholders() -> usize {
+    let rows: Vec<Txn> = global().all().into_iter().filter(|t| t.source == PLACEHOLDER_SOURCE).collect();
+    let n = rows.len();
+    for t in rows {
+        global().delete(&t.id);
+    }
+    if n > 0 {
+        tracing::info!("purged {n} placeholder transaction(s)");
+        crate::charts::refresh();
+    }
+    n
+}
+
+/// Seed a deterministic three-month sample ledger (this month so far plus the
+/// two before it). Only meant for an empty ledger; the caller checks that.
+pub fn seed_placeholders(today: NaiveDate) -> usize {
+    let month_start = |d: NaiveDate| NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d);
+    let prev = |d: NaiveDate| {
+        let (y, m) = if d.month() == 1 { (d.year() - 1, 12) } else { (d.year(), d.month() - 1) };
+        NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(d)
+    };
+    let this = month_start(today);
+    let months = [prev(prev(this)), prev(this), this];
+    // (day, name, amount, direction, category)
+    let template: &[(u32, &str, f64, &str, &str)] = &[
+        (1, "Sample · Payroll", 2850.0, "Income", "Salary"),
+        (15, "Sample · Payroll", 2850.0, "Income", "Salary"),
+        (1, "Sample · Rent e-transfer", 1860.0, "Expense", "Housing"),
+        (2, "Sample · Hydro", 96.4, "Expense", "Utilities"),
+        (3, "Sample · Phone plan", 58.0, "Expense", "Subscriptions"),
+        (4, "Sample · Grocery run", 112.35, "Expense", "Groceries"),
+        (6, "Sample · Coffee", 6.25, "Expense", "Dining"),
+        (7, "Sample · Transit pass", 128.15, "Expense", "Transport"),
+        (9, "Sample · Restaurant", 74.9, "Expense", "Dining"),
+        (11, "Sample · Grocery run", 98.7, "Expense", "Groceries"),
+        (12, "Sample · Streaming", 18.99, "Expense", "Subscriptions"),
+        (13, "Sample · Pharmacy", 32.4, "Expense", "Health"),
+        (14, "Sample · ATM withdrawal", 100.0, "Expense", "Cash"),
+        (16, "Sample · Savings contribution", 600.0, "Transfer", "Savings"),
+        (17, "Sample · Credit card payment", 1450.0, "Transfer", "Card payment"),
+        (18, "Sample · Grocery run", 121.6, "Expense", "Groceries"),
+        (19, "Sample · Online order", 89.99, "Expense", "Shopping"),
+        (20, "Sample · Return refund", 45.0, "Refund", "Shopping"),
+        (21, "Sample · Student loan", 193.13, "Expense", "Loans"),
+        (22, "Sample · Concert tickets", 140.0, "Expense", "Entertainment"),
+        (23, "Sample · From savings", 200.0, "Transfer", "Transfer in"),
+        (25, "Sample · Grocery run", 104.2, "Expense", "Groceries"),
+        (26, "Sample · Dinner out", 62.5, "Expense", "Dining"),
+        (27, "Sample · Freelance invoice", 400.0, "Income", "Income"),
+        (28, "Sample · Gas", 65.0, "Expense", "Transport"),
+    ];
+    let mut n = 0;
+    for (i, m) in months.iter().enumerate() {
+        for (day, name, amount, dir, cat) in template {
+            let Some(d) = NaiveDate::from_ymd_opt(m.year(), m.month(), *day) else { continue };
+            if d > today {
+                continue;
+            }
+            // Vary amounts a little per month so the charts aren't flat lines.
+            let wobble = 1.0 + (i as f64 - 1.0) * 0.06;
+            let amt = if *dir == "Income" && *cat == "Salary" { *amount } else { ((amount * wobble) * 100.0).round() / 100.0 };
+            let key = format!("placeholder:{}:{}:{}", d, name, amt);
+            if global().has_key(&key) {
+                continue;
+            }
+            let ok = global()
+                .insert(Txn {
+                    date: d.to_string(),
+                    name: name.to_string(),
+                    amount: amt,
+                    direction: dir.to_string(),
+                    category: cat.to_string(),
+                    source: PLACEHOLDER_SOURCE.into(),
+                    key,
+                    ..Default::default()
+                })
+                .is_ok();
+            if ok {
+                n += 1;
+            }
+        }
+    }
+    if n > 0 {
+        crate::charts::refresh();
+    }
+    n
+}
+
+/// `/transactions [n]` — the newest rows, numbered so `/remove_transaction N`
+/// can target one. Returns (rich html, plain fallback).
+pub fn recent_listing(limit: usize) -> (String, String) {
+    let rows = global().recent(limit);
+    if rows.is_empty() {
+        return ("<b>No transactions yet.</b>".into(), "No transactions yet.".into());
+    }
+    let esc = crate::engine::html_escape;
+    let mut html = String::from("<b>Recent transactions</b><table><thead><tr><th>#</th><th>Date</th><th>Name</th><th>Amount</th></tr></thead><tbody>");
+    let mut text = String::from("Recent transactions\n");
+    for (i, t) in rows.iter().enumerate() {
+        let sign = match t.direction.as_str() { "Income" | "Refund" => "+", "Transfer" => "↔", _ => "-" };
+        let flag = if !t.note.is_empty() { " ⚠️" } else if t.source == PLACEHOLDER_SOURCE { " (sample)" } else { "" };
+        html.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}{flag}<br><i>{}</i></td><td>{sign}{}</td></tr>",
+            i + 1, esc(&t.date), esc(&t.name), esc(&t.category), money(t.amount)
+        ));
+        text.push_str(&format!("{}. {} {} {sign}{} ({}){flag}\n", i + 1, t.date, t.name, money(t.amount), t.category));
+    }
+    html.push_str("</tbody></table><i>⚠️ = flagged as a likely duplicate. Remove one with /remove_transaction N.</i>");
+    text.push_str("⚠️ = likely duplicate. Remove one with /remove_transaction N.");
+    (html, text)
+}
+
+/// Delete the N-th newest row (1-based, as listed by `/transactions`).
+pub fn remove_nth(n: usize) -> Option<Txn> {
+    let rows = global().recent(n.max(1));
+    let t = rows.into_iter().nth(n.checked_sub(1)?)?;
+    let removed = global().delete(&t.id).then_some(t);
+    if removed.is_some() {
+        crate::charts::refresh();
+    }
+    removed
 }
 
 /// Ask an LLM to turn raw CSV text into a clean JSON array of transactions.
@@ -686,7 +900,7 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
     // reuses the prior result instead of paying for the LLM again. `today` is
     // deliberately NOT in the key — it only fills missing dates, and keying on it
     // would defeat the cache across days.
-    let ck = crate::cache::key("csv", &[&model, account_hint, csv]);
+    let ck = crate::cache::key("csv-v2", &[&model, account_hint, csv]);
     if let Some(cached) = crate::cache::get(&ck) {
         if let Ok(rows) = serde_json::from_str::<Vec<Row>>(&cached) {
             return Ok(rows);
@@ -704,7 +918,7 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
          CREDIT-CARD statement: a POSITIVE amount is a purchase → \"Expense\"; a NEGATIVE amount is a credit → \"Refund\" if it's a merchant return, or \"Transfer\" if it's a card payment ('PAYMENT RECEIVED', 'THANK YOU', a 'TF'/transfer from a bank account). A credit card has NO \"Income\".\n\
          CHEQUING statement: payroll ('PAY/PAY', wages, direct deposit) → \"Income\" category \"Salary\"; government/tax deposit, interest, or Interac e-transfer RECEIVED → \"Income\"; a fee rebate → \"Refund\"; a transfer to a credit card ('TF <long card number>', 'AMEX … PYMT/FTD/BILL'), a move between your own accounts, or an investment ('WS INVESTMENTS','INV/PLA') → \"Transfer\"; a bill, purchase, insurance, fee, or Interac e-transfer SENT → \"Expense\".\n\
          An ABM/ATM cash withdrawal — a bank-machine withdrawal, often shown only as a street address or location with a code like '[IB]', 'ABM', 'ATM', or 'WITHDRAWAL' and no merchant — is an \"Expense\" with category \"Cash\"; NEVER infer a category from the street name/address of such a row. A student-loan payment ('NSLSC' / 'student loan') is an \"Expense\" with category \"Loans\".\n\
-         For \"Expense\" choose the best category; use \"Salary\" ONLY for payroll. One element per transaction row; ignore header rows, opening/closing balance lines, and blank rows. If a date is missing use {today}; normalize all dates to YYYY-MM-DD."
+         For \"Expense\" choose the best category; use \"Salary\" ONLY for payroll. For \"Transfer\" the category MUST be one of: \"Card payment\" (paying a credit-card bill, seen from either account), \"Savings\" (a contribution to savings or investments), \"Transfer in\" (money arriving from another of your OWN accounts, e.g. a withdrawal from savings), \"Transfer out\" (money leaving to another of your own accounts that is not a card payment or savings). One element per transaction row; ignore header rows, opening/closing balance lines, and blank rows. If a date is missing use {today}; normalize all dates to YYYY-MM-DD."
     );
     let body = json!({
         "model": model,
@@ -743,3 +957,47 @@ fn strip_fences(s: &str) -> String {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ledger_insert_range_and_dedup() {
+        let l = Ledger { db: Db::memory().unwrap() };
+        l.insert(Txn { date: "2026-09-01".into(), name: "Coffee".into(), amount: 4.5, direction: "Expense".into(), category: "Dining".into(), key: "k1".into(), ..Default::default() }).unwrap();
+        l.insert(Txn { date: "2026-09-15".into(), name: "Pay".into(), amount: 3000.0, direction: "Income".into(), category: "Salary".into(), key: "k2".into(), ..Default::default() }).unwrap();
+        assert!(l.has_key("k1"));
+        assert!(!l.has_key("nope"));
+        let sept = l.in_range(NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 9, 10).unwrap());
+        assert_eq!(sept.len(), 1);
+        assert_eq!(sept[0].name, "Coffee");
+        assert_eq!(l.recent(1)[0].name, "Pay");
+        let id = l.recent(1)[0].id.clone();
+        assert!(l.delete(&id));
+        assert_eq!(l.all().len(), 1);
+    }
+
+    #[test]
+    fn placeholders_seed_and_purge() {
+        init(Db::memory().unwrap());
+        // Mirror notes land in whatever VAULT_DIR is current (a gitignored test
+        // vault or backend/vault); don't touch the process-wide env from here.
+        let today = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
+        let n = seed_placeholders(today);
+        assert!(n > 40, "seeded {n}");
+        assert_eq!(seed_placeholders(today), 0, "idempotent");
+        assert!(global().all().iter().all(|t| t.source == PLACEHOLDER_SOURCE));
+        assert!(global().all().iter().all(|t| t.date <= "2026-09-11".to_string()), "nothing in the future");
+        assert_eq!(purge_placeholders(), n);
+        assert!(global().all().is_empty());
+    }
+
+    #[test]
+    fn near_duplicate_is_flagged_within_window() {
+        let prior = vec![(2450, "2026-09-01".to_string(), "Expense".to_string())];
+        assert!(likely_dup_note(&prior, 2450, "Expense", "2026-09-03").is_some());
+        assert!(likely_dup_note(&prior, 2450, "Expense", "2026-09-20").is_none());
+        assert!(likely_dup_note(&prior, 2450, "Income", "2026-09-01").is_none());
+    }
+}

@@ -1,0 +1,78 @@
+# Notes — views over notes/ (written by /note). status: inbox | draft | final.
+filters:
+  and:
+    - 'type == "note"'
+properties:
+  title:
+    displayName: Note
+  category:
+    displayName: Category
+  status:
+    displayName: Status
+  tags:
+    displayName: Tags
+  created:
+    displayName: Created
+  source:
+    displayName: Source
+views:
+  - type: table
+    name: Inbox
+    filters:
+      and:
+        - 'status == "inbox"'
+    order:
+      - title
+      - category
+      - tags
+      - created
+    sort:
+      - property: created
+        direction: DESC
+  - type: cards
+    name: Recent
+    limit: 24
+    order:
+      - title
+      - tags
+      - status
+      - created
+    sort:
+      - property: created
+        direction: DESC
+  - type: table
+    name: All
+    order:
+      - title
+      - status
+      - tags
+      - created
+      - source
+    sort:
+      - property: created
+        direction: DESC
+  - type: table
+    name: By category
+    groupBy:
+      property: category
+      direction: ASC
+    order:
+      - title
+      - status
+      - tags
+      - created
+    sort:
+      - property: created
+        direction: DESC
+  - type: table
+    name: By status
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - title
+      - tags
+      - created
+    sort:
+      - property: created
+        direction: DESC
