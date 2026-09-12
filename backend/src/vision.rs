@@ -50,8 +50,10 @@ pub async fn read_receipt(image: Vec<u8>, mime: &str) -> Result<String> {
         .header("HTTP-Referer", "http://localhost:5173")
         .header("X-Title", "Optimimer")
         .json(&body)
+        .timeout(crate::openrouter::LLM_TIMEOUT)
         .send()
-        .await?;
+        .await
+        .map_err(|e| crate::openrouter::net_err("receipt OCR", &model, e))?;
     let status = resp.status();
     let j: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {

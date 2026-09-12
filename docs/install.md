@@ -61,9 +61,10 @@ of the named volume if you want the vault synced by Obsidian on the same machine
 ### macOS and Windows
 
 Download `optimimer-<version>-macos-arm64.tar.gz` (Apple silicon), `-macos-amd64.tar.gz` (Intel) or
-`-windows-amd64.zip`, unpack, and follow the `README.md` inside: create a `.env` with the two keys next to the
-binary, run it, and send the setup code printed in the log to your bot. Keep it running with a launchd agent or a
-Task Scheduler task. macOS may ask you to allow the unsigned binary under Privacy & Security the first time.
+`-windows-amd64.zip`, unpack, and run the binary (double-click on Windows). The first run asks for the bot token,
+the OpenRouter key and your timezone right in the window, saves them to a `.env` next to the binary, and prints the
+setup code in a box. Keep it running with a launchd agent or a Task Scheduler task. macOS may ask you to allow the
+unsigned binary under Privacy & Security the first time.
 
 ### From a git clone (any Linux with systemd)
 

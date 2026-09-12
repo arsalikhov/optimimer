@@ -75,6 +75,9 @@ struct BotState {
     /// Static allowlist from TELEGRAM_ALLOWED_CHAT_IDS, on top of the chats
     /// paired in the database. Deny-by-default: unknown chats only get to pair.
     allowed: Arc<HashSet<i64>>,
+    /// One lock per chat: agent turns run off the polling loop (so a slow model
+    /// can't freeze the bot) but stay in order within a chat.
+    turns: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl BotState {
@@ -86,6 +89,10 @@ impl BotState {
     /// has, any env-allowlisted chat (single-user installs from before pairing).
     fn is_owner(&self, chat_id: i64) -> bool {
         config::is_owner(chat_id) || (config::owner_chat().is_none() && self.allowed.contains(&chat_id))
+    }
+
+    fn turn_lock(&self, chat_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+        self.turns.lock().unwrap().entry(chat_id).or_default().clone()
     }
 }
 
@@ -136,7 +143,10 @@ pub async fn run_bot(store: Store, db: Db) {
         .filter_map(|s| s.trim().parse::<i64>().ok())
         .collect();
     match config::setup_code() {
-        Some(code) => tracing::info!("No owner paired yet. Open Telegram, message the bot and send the setup code: {code}"),
+        Some(code) => {
+            tracing::info!("No owner paired yet. Open Telegram, message the bot and send the setup code: {code}");
+            crate::setup::print_setup_code(&code);
+        }
         None => tracing::info!(
             "Telegram access: {} paired chat(s), {} from TELEGRAM_ALLOWED_CHAT_IDS",
             config::chats().len(),
@@ -152,6 +162,7 @@ pub async fn run_bot(store: Store, db: Db) {
         pending: Arc::new(Mutex::new(HashMap::new())),
         db,
         allowed: Arc::new(allowed),
+        turns: Arc::new(Mutex::new(HashMap::new())),
     };
     let mut offset: i64 = 0;
 
@@ -327,9 +338,15 @@ pub async fn run_bot(store: Store, db: Db) {
             if text.is_empty() {
                 continue;
             }
-            if let Some(reply) = run_agent(&client, &api, &state, chat_id, &text).await {
-                send(&client, &api, chat_id, &reply).await;
-            }
+            // Off the polling loop: other chats (and pins, buttons, forwards)
+            // keep flowing while this turn waits on the model.
+            let (client, api, state) = (client.clone(), api.clone(), state.clone());
+            tokio::spawn(async move {
+                let _turn = state.turn_lock(chat_id).lock_owned().await;
+                if let Some(reply) = run_agent(&client, &api, &state, chat_id, &text).await {
+                    send(&client, &api, chat_id, &reply).await;
+                }
+            });
         }
     }
 }
@@ -398,12 +415,32 @@ async fn send(client: &reqwest::Client, api: &str, chat_id: i64, reply: &Reply) 
         // in the input bar. Harmless no-op otherwise; doesn't touch inline keyboards.
         body["reply_markup"] = json!({ "remove_keyboard": true });
     }
-    if let Err(e) = client
-        .post(format!("{api}/sendMessage"))
-        .json(&body)
-        .send()
-        .await
-    {
-        tracing::warn!("sendMessage failed: {e}");
+    match client.post(format!("{api}/sendMessage")).json(&body).send().await {
+        Err(e) => tracing::warn!("sendMessage failed: {e}"),
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            // Telegram said no. The usual reason is Markdown it can't parse (a
+            // stray `_` or `*` in user-supplied text); resend as plain text so
+            // the user still gets the message, and log everything else.
+            let status = resp.status();
+            let desc = resp
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| v["description"].as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            if desc.to_lowercase().contains("parse") {
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("parse_mode");
+                }
+                match client.post(format!("{api}/sendMessage")).json(&body).send().await {
+                    Ok(r) if r.status().is_success() => tracing::info!("sendMessage: Markdown rejected ({desc}) — resent as plain text"),
+                    Ok(r) => tracing::warn!("sendMessage rejected twice ({}, then {})", desc, r.status()),
+                    Err(e) => tracing::warn!("sendMessage retry failed: {e}"),
+                }
+            } else {
+                tracing::warn!("sendMessage rejected ({status}): {desc}");
+            }
+        }
     }
 }

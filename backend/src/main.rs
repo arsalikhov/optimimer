@@ -10,6 +10,7 @@ mod memory;
 mod models;
 mod openrouter;
 mod scheduler;
+mod setup;
 mod shopper;
 mod vault;
 mod convo;
@@ -39,13 +40,18 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().ok(); // load backend/.env if present
+    // .env from the working dir or next to the binary; on a bare download with
+    // nothing configured, ask the three questions right here.
+    setup::load_env();
+    setup::first_run_wizard();
 
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tower_http=info".into()),
         )
+        .with_ansi(setup::ansi_ok())
+        .with_target(false)
         .init();
 
     // One SQLite database holds all persistent state (agents, timezones,

@@ -323,7 +323,16 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
 pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotState, chat_id: i64, user_text: &str) -> Option<Reply> {
     let mem = memory::global();
     let user_id = mem.add_message(chat_id, "user", user_text);
-    typing(client, api, chat_id).await;
+    // "typing…" only lasts ~5s per call; keep it alive for as long as the model takes.
+    let keep_typing = {
+        let (c, a) = (client.clone(), api.to_string());
+        tokio::spawn(async move {
+            loop {
+                typing(&c, &a, chat_id).await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+        })
+    };
 
     let tools = agent_tools();
     let mut messages = vec![json!({ "role": "system", "content": system_prompt(state, chat_id) })];
@@ -393,6 +402,7 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
     });
     let _ = user_id;
 
+    keep_typing.abort();
     if final_text.is_empty() {
         if shown_any { None } else { Some(Reply::text("Done.")) }
     } else {

@@ -44,8 +44,10 @@ pub async fn transcribe(audio: Vec<u8>, format: &str) -> Result<String> {
         .header("HTTP-Referer", "http://localhost:5173")
         .header("X-Title", "Optimimer")
         .json(&body)
+        .timeout(crate::openrouter::LLM_TIMEOUT)
         .send()
-        .await?;
+        .await
+        .map_err(|e| crate::openrouter::net_err("transcription", &model, e))?;
     let status = resp.status();
     let j: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {

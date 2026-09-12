@@ -933,6 +933,7 @@ async fn normalize_csv(csv: &str, today: &str, account_hint: &str) -> Result<Vec
         .header("HTTP-Referer", "http://localhost:5173")
         .header("X-Title", "Optimimer")
         .json(&body)
+        .timeout(std::time::Duration::from_secs(240))
         .send()
         .await?;
     let status = resp.status();

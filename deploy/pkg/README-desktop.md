@@ -1,17 +1,17 @@
-# Optimimer — running the binary directly (macOS, Windows, any Linux)
+# Optimimer on macOS, Windows or a plain Linux folder
 
-1. Put `optimimer-backend` (or `optimimer-backend.exe`) and the `agents/` folder in a directory of your own,
-   e.g. `~/optimimer`.
-2. In that directory create a file named `.env` with two lines:
+1. Keep `optimimer-backend` (or `optimimer-backend.exe`) and the `agents` folder together, anywhere you like —
+   for example a folder called `optimimer` in your home directory.
+2. Run the binary (double-click on Windows; `./optimimer-backend` in a terminal on macOS or Linux — macOS may ask you
+   to allow it under Privacy & Security the first time).
+3. The first run asks three questions right in the window: your Telegram bot token (from @BotFather), your OpenRouter
+   API key (free models work with no credits; leave blank for offline mock mode), and your timezone. The answers are
+   saved to a `.env` file next to the binary; delete that file to answer again.
+4. A **setup code** is printed in a box. Send it to your bot from Telegram to pair as the owner; the bot then asks
+   your name, timezone, categories and which models to use.
 
-       TELEGRAM_BOT_TOKEN=<token from @BotFather>
-       OPENROUTER_API_KEY=<key from openrouter.ai>
+The database (`optimimer.db`) and the `vault` folder are created next to the binary unless you pointed the vault
+question at your Obsidian vault. Keep the window open, or run it in the background with a launchd agent (macOS), a
+Task Scheduler "at logon" task (Windows) or a user systemd unit (Linux).
 
-   Optional: `DEFAULT_TZ=Europe/London` and `VAULT_DIR=/path/to/your/Obsidian/vault`.
-3. Run `./optimimer-backend` (double-click works on Windows). The log prints a **setup code**; send it to your bot
-   from Telegram to pair as the owner. The bot then asks your name, timezone and categories.
-
-The database (`optimimer.db`) and, unless you pointed `VAULT_DIR` elsewhere, the `vault/` folder are created next
-to the binary. Keep it running with whatever you already use for background programs: a launchd agent on macOS, a
-Task Scheduler "at logon" task on Windows, a user systemd unit on Linux. Full documentation:
-https://github.com/arsalikhov/optimimer/tree/main/docs
+Full documentation: https://github.com/arsalikhov/optimimer/tree/main/docs

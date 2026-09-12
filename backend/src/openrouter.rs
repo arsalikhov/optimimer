@@ -27,8 +27,10 @@ pub async fn chat(model: &str, system: &str, prompt: &str) -> Result<String> {
         .header("HTTP-Referer", "http://localhost:5173")
         .header("X-Title", "Optimimer")
         .json(&json!({ "model": model, "messages": messages }))
+        .timeout(LLM_TIMEOUT)
         .send()
-        .await?;
+        .await
+        .map_err(|e| net_err("chat", model, e))?;
 
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
@@ -64,8 +66,10 @@ pub async fn chat_tools(model: &str, messages: &[Value], tools: &Value) -> Resul
         .header("HTTP-Referer", "http://localhost:5173")
         .header("X-Title", "Optimimer")
         .json(&json!({ "model": model, "messages": messages, "tools": tools, "tool_choice": "auto" }))
+        .timeout(LLM_TIMEOUT)
         .send()
-        .await?;
+        .await
+        .map_err(|e| net_err("agent", model, e))?;
 
     let status = resp.status();
     let body: Value = resp.json().await?;
@@ -77,6 +81,19 @@ pub async fn chat_tools(model: &str, messages: &[Value], tools: &Value) -> Resul
         return Err(anyhow!("unexpected OpenRouter response: {}", body));
     }
     Ok(msg)
+}
+
+/// Upper bound for one model call. Free models get queued under load; without
+/// this a stuck request froze the whole bot with no reply at all.
+pub const LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// A transport-level failure (timeout, DNS, TLS) in plain words.
+pub fn net_err(what: &str, model: &str, e: reqwest::Error) -> anyhow::Error {
+    if e.is_timeout() {
+        anyhow!("{what}: `{model}` took more than {}s to answer (free models get queued under load) — try again in a minute, or say \"use paid models\".", LLM_TIMEOUT.as_secs())
+    } else {
+        anyhow!("{what}: couldn't reach OpenRouter ({e})")
+    }
 }
 
 /// Turn an OpenRouter error into something the user can act on. The common
