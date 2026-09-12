@@ -3,8 +3,10 @@
 //! * `free` (the default) — OpenRouter's free models. No credits needed, so a
 //!   fresh account works out of the box; slower and less accurate, and the
 //!   audio/vision ones are best-effort.
-//! * `paid` — Claude Sonnet 4.6 / Haiku 4.5 and Voxtral, billed to the
-//!   account's OpenRouter credits. Best results.
+//! * `paid` — cheap-but-good models for the everyday work (Claude Haiku 4.5
+//!   for the agent, Gemini Flash Lite for parsing), with an escalation ladder
+//!   the agent climbs only when a request needs it: `strong` (Claude Sonnet 5)
+//!   and `max` (Claude Opus 5). Billed to the account's OpenRouter credits.
 //!
 //! The tier is a stored setting (`model_tier`, env `MODEL_TIER`) that the owner
 //! picks during onboarding or by saying "use paid models". Each role can still
@@ -40,6 +42,10 @@ pub fn is_paid() -> bool {
 struct Set {
     /// The conversational agent (must support tool calling).
     agent: &'static str,
+    /// What the agent escalates to for hard requests (`escalate("strong")`).
+    strong: &'static str,
+    /// The top of the ladder, for genuinely hard problems (`escalate("max")`).
+    max: &'static str,
     /// Strict JSON parsers (tasks, notes, money, CSV rows, summaries).
     parser: &'static str,
     /// Cheap background work (memory extraction, reminders, email drafts).
@@ -54,6 +60,8 @@ struct Set {
 
 const FREE: Set = Set {
     agent: "nvidia/nemotron-3-super-120b-a12b:free",
+    strong: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    max: "nvidia/nemotron-3-ultra-550b-a55b:free",
     parser: "nvidia/nemotron-3-super-120b-a12b:free",
     cheap: "nvidia/nemotron-3.5-lightning:free",
     ocr: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -61,13 +69,18 @@ const FREE: Set = Set {
     shopper: "nvidia/nemotron-3.5-lightning:free",
 };
 
+// Prices (per million tokens, in/out, OpenRouter 2026-09): Haiku 4.5 $1/$5,
+// Gemini 3.1 Flash Lite $0.25/$1.5, Sonnet 5 $2/$10, Opus 5 $5/$25 — versus
+// the old flat Sonnet 4.6 at $3/$15 for everything.
 const PAID: Set = Set {
-    agent: "anthropic/claude-sonnet-4.6",
-    parser: "anthropic/claude-sonnet-4.6",
-    cheap: "anthropic/claude-haiku-4.5",
-    ocr: "anthropic/claude-sonnet-4.6",
+    agent: "anthropic/claude-haiku-4.5",
+    strong: "anthropic/claude-sonnet-5",
+    max: "anthropic/claude-opus-5",
+    parser: "google/gemini-3.1-flash-lite",
+    cheap: "google/gemini-3.1-flash-lite",
+    ocr: "anthropic/claude-haiku-4.5",
     transcribe: "mistralai/voxtral-small-24b-2507",
-    shopper: "nvidia/nemotron-3-super-120b-a12b",
+    shopper: "google/gemini-3.1-flash-lite",
 };
 
 fn set() -> &'static Set {
@@ -83,10 +96,13 @@ fn pick(env: &str, role: fn(&Set) -> &'static str) -> String {
 }
 
 pub fn agent() -> String { pick("AGENT_MODEL", |s| s.agent) }
+pub fn strong() -> String { pick("STRONG_MODEL", |s| s.strong) }
+pub fn max() -> String { pick("MAX_MODEL", |s| s.max) }
 pub fn parser() -> String { pick("PARSER_MODEL", |s| s.parser) }
 pub fn memory() -> String { pick("MEMORY_MODEL", |s| s.cheap) }
-pub fn convo() -> String { pick("CONVO_MODEL", |s| s.parser) }
-pub fn finance() -> String { pick("FINANCE_MODEL", |s| s.parser) }
+/// Summaries and CSV classification read like the agent's work: agent-grade model.
+pub fn convo() -> String { pick("CONVO_MODEL", |s| s.agent) }
+pub fn finance() -> String { pick("FINANCE_MODEL", |s| s.agent) }
 pub fn ocr() -> String { pick("OCR_MODEL", |s| s.ocr) }
 pub fn transcribe() -> String { pick("TRANSCRIBE_MODEL", |s| s.transcribe) }
 pub fn shopper() -> String { pick("SHOPPER_MODEL", |s| s.shopper) }
@@ -106,9 +122,9 @@ pub fn resolve(spec: &str) -> String {
 pub fn describe() -> String {
     let base = match tier() {
         Tier::Free => "free (OpenRouter's free Nemotron models — no credits needed, weaker)".to_string(),
-        Tier::Paid => "paid (Claude Sonnet 4.6 / Haiku 4.5 + Voxtral via OpenRouter credits)".to_string(),
+        Tier::Paid => format!("paid ({} everyday, {} when escalated, {} at most; {} for parsing)", agent(), strong(), max(), parser()),
     };
-    let pinned: Vec<String> = ["AGENT_MODEL", "PARSER_MODEL", "MEMORY_MODEL", "CONVO_MODEL", "FINANCE_MODEL", "OCR_MODEL", "TRANSCRIBE_MODEL", "SHOPPER_MODEL"]
+    let pinned: Vec<String> = ["AGENT_MODEL", "STRONG_MODEL", "MAX_MODEL", "PARSER_MODEL", "MEMORY_MODEL", "CONVO_MODEL", "FINANCE_MODEL", "OCR_MODEL", "TRANSCRIBE_MODEL", "SHOPPER_MODEL"]
         .iter()
         .filter_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()).map(|v| format!("{k}={v}")))
         .collect();

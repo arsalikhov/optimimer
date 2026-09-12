@@ -95,6 +95,11 @@ pub(super) fn agent_tools() -> Value {
         tool_def("list_watches", "Show active stock watches (displayed directly).", obj(json!({}), &[])),
         tool_def("unwatch", "Stop a stock watch by number, or 'all'.", obj(json!({ "which": { "type": "string" } }), &["which"])),
         tool_def("wake_machine", "Wake one of the user's registered machines via Wake-on-LAN. Omit the name when only one is registered.", obj(json!({ "name": { "type": "string" } }), &[])),
+        // ---- escalation ----
+        tool_def("escalate", "Hand this turn to a stronger (more expensive) model and continue. Use 'strong' when the request needs careful multi-step reasoning, planning, tricky maths/code, or your first attempt came out wrong; use 'max' only for genuinely hard problems or when the user explicitly asks for the best model.", obj(json!({
+            "level": { "type": "string", "enum": ["strong", "max"] },
+            "reason": { "type": "string", "description": "one short phrase" }
+        }), &["level"])),
         // ---- web ----
         tool_def("web_search", "Search the web for current information (news, prices, opening hours, facts you don't know). Returns titles, URLs and snippets; call read_page on a result when the snippet isn't enough.", obj(json!({ "query": { "type": "string" } }), &["query"])),
         tool_def("read_page", "Fetch a web page and return its readable text (first few thousand characters).", obj(json!({ "url": { "type": "string" } }), &["url"])),
@@ -323,6 +328,10 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
            Use `remember` when the user tells you something worth keeping.\n\
          - For anything current or outside your knowledge (news, prices, weather, hours, recent events), call `web_search`, \
            then `read_page` on the best hit if the snippets aren't enough; mention the source URL in your answer.\n\
+         - You start on a fast, inexpensive model. For requests that need real reasoning — multi-step planning, tricky \
+           maths or code, subtle judgement, or when your first attempt came out wrong — call `escalate` with level \
+           'strong' and continue; 'max' only for genuinely hard problems or when the user asks for the best model. \
+           Everyday tasks, notes, money and lookups never need it.\n\
          - When a tool says it was displayed to the user, do not repeat its contents; reply with one short sentence or nothing at all.\n\
          - Confirmations for destructive actions are handled by buttons; never assume they were tapped.\n\
          - Voice transcripts arrive as plain text; if one is clearly a thought-dump rather than a request, use `save_memo`.\n\
@@ -369,8 +378,11 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
     // What tools actually saved this turn — handed to the memory extractor so it
     // doesn't restate a task/note/expense as a "fact".
     let mut recorded: Vec<String> = Vec::new();
+    // Start cheap; the model can climb to `strong` and then `max` mid-turn.
+    let mut model = agent_model();
+    let mut rung = 0u8;
     for step in 0..AGENT_MAX_STEPS {
-        let msg = match crate::openrouter::chat_tools(&agent_model(), &messages, &tools).await {
+        let msg = match crate::openrouter::chat_tools(&model, &messages, &tools).await {
             Ok(m) => m,
             Err(e) => {
                 final_text = format!("I couldn't get an answer from the model — {e}");
@@ -388,6 +400,19 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
             let name = call["function"]["name"].as_str().unwrap_or("").to_string();
             let cargs: Value = call["function"]["arguments"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| json!({}));
             tracing::info!("agent tool {name} {}", cargs);
+            if name == "escalate" {
+                let want = if cargs["level"].as_str() == Some("max") { 2 } else { 1 };
+                let text = if want > rung {
+                    rung = want;
+                    model = if rung == 2 { crate::llm::max() } else { crate::llm::strong() };
+                    tracing::info!("agent escalated to {model} ({})", cargs["reason"].as_str().unwrap_or(""));
+                    format!("(now running on {model}; carry on with the request)")
+                } else {
+                    "(already on that model or stronger; carry on)".to_string()
+                };
+                messages.push(json!({ "role": "tool", "tool_call_id": id, "content": text }));
+                continue;
+            }
             let result = exec_tool(state, chat_id, &name, &cargs).await;
             if matches!(name.as_str(), "create_task" | "save_note" | "save_memo" | "log_expense" | "log_income" | "set_reminder" | "remember" | "complete_task") {
                 recorded.push(format!("{name}: {}", result.text.lines().next().unwrap_or("")));

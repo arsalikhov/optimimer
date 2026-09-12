@@ -60,8 +60,12 @@ later by saying "use paid models" / "use free models":
 - **`free`** (default): `nvidia/nemotron-3-super-120b-a12b:free` for the agent, parsers and summaries;
   `nvidia/nemotron-3.5-lightning:free` for memory, reminders and stock watches;
   `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` for receipts and voice.
-- **`paid`**: `anthropic/claude-sonnet-4.6` for the agent, parsers, summaries and receipts;
-  `anthropic/claude-haiku-4.5` for memory and reminders; `mistralai/voxtral-small-24b-2507` for voice.
+- **`paid`**: cheap-but-good by default, with a ladder the agent climbs only when a request needs it.
+  `anthropic/claude-haiku-4.5` for the agent, summaries, CSV rows and receipts; `google/gemini-3.1-flash-lite` for
+  the strict parsers, memory, reminders and stock watches; `mistralai/voxtral-small-24b-2507` for voice. When the
+  agent judges a request needs real reasoning it calls `escalate` and the turn continues on
+  `anthropic/claude-sonnet-5` (**strong**), or `anthropic/claude-opus-5` (**max**) for genuinely hard problems or
+  when you ask for the best model. Everyday tasks, notes and money never leave the cheap rung.
 
 Free models cost nothing but are rate-limited (about 50 requests a day, 1000 once the account has ever bought $10
 of credits), slower, and weaker at tool calling; voice and receipts are best-effort. Free model ids rotate on
@@ -70,7 +74,9 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `MODEL_TIER` | stored setting | `free` or `paid`; overrides what was chosen in chat. |
-| `AGENT_MODEL` | tier default | The conversational agent; must support tool calling. |
+| `AGENT_MODEL` | tier default | The conversational agent's everyday model; must support tool calling. |
+| `STRONG_MODEL` | tier default | Where `escalate("strong")` goes. |
+| `MAX_MODEL` | tier default | Where `escalate("max")` goes. |
 | `PARSER_MODEL` | tier default | Strict JSON parsers (tasks, notes, money). |
 | `MEMORY_MODEL` | tier default | Fact extraction and summary folding. |
 | `CONVO_MODEL` | tier default | Summaries of forwarded batches and voice memos. |
@@ -95,7 +101,7 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
-| `BRAVE_API_KEY` | unset | Use [Brave Search](https://brave.com/search/api/) (free: 2000 queries/month) instead of DuckDuckGo. |
+| `BRAVE_API_KEY` | unset | Use [Brave Search](https://brave.com/search/api/) (free tier) instead of DuckDuckGo. |
 
 Without a key the `web_search` tool scrapes DuckDuckGo's HTML endpoint — free and keyless, but it occasionally
 rate-limits; the bot says so when that happens. `read_page` fetches any http(s) URL and hands the model its text.
