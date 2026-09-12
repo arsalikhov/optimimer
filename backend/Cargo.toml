@@ -1,6 +1,6 @@
 [package]
 name = "optimimer-backend"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [dependencies]
@@ -19,6 +19,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 tzf-rs = "0.4"
 dotenvy = "0.15"
+url = "2"
 enable-ansi-support = "0.2"
 iana-time-zone = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }

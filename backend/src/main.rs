@@ -18,6 +18,7 @@ mod store;
 mod telegram;
 mod transcribe;
 mod vision;
+mod web;
 
 use axum::{
     extract::{Path, State},

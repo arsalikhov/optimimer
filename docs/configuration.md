@@ -91,6 +91,15 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 | `SHOPPER_CHECK_SECS` | `3600` | Stock re-check interval. |
 | `GANTT_REFRESH_SECS` | `600` | How often the task timeline is regenerated. |
 
+## Web search
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `BRAVE_API_KEY` | unset | Use [Brave Search](https://brave.com/search/api/) (free: 2000 queries/month) instead of DuckDuckGo. |
+
+Without a key the `web_search` tool scrapes DuckDuckGo's HTML endpoint — free and keyless, but it occasionally
+rate-limits; the bot says so when that happens. `read_page` fetches any http(s) URL and hands the model its text.
+
 ## Email
 
 | Variable | Purpose |

@@ -2,7 +2,7 @@
 
 A private assistant you talk to on **Telegram**, running on your own **Raspberry Pi**. It files tasks, notes and
 voice memos into your **Obsidian** vault, keeps a money ledger, remembers what you tell it, sets reminders, manages
-shopping lists, watches product pages, wakes your desktop over the network, and summarises forwarded chats — with no
+shopping lists, searches the web, watches product pages, wakes your desktop, and summarises forwarded chats — with no
 slash commands. You say what you want; a tool-calling model does it — OpenRouter's free models by default, Claude if
 you add credits.
 

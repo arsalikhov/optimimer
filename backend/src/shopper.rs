@@ -221,7 +221,7 @@ async fn check_stock(client: &reqwest::Client, url: &str) -> anyhow::Result<Stoc
 /// Crude HTML → visible text: drop script/style bodies, strip tags, collapse
 /// whitespace, cap at `max` chars. Good enough for an LLM to read a shop page
 /// without shipping half a megabyte of markup.
-fn page_text(html: &str, max: usize) -> String {
+pub(crate) fn page_text(html: &str, max: usize) -> String {
     let mut out = String::with_capacity(html.len().min(max));
     // Remove <script>…</script> and <style>…</style> wholesale (case-insensitive).
     let lower = html.to_lowercase();

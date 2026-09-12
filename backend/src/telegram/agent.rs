@@ -95,6 +95,9 @@ pub(super) fn agent_tools() -> Value {
         tool_def("list_watches", "Show active stock watches (displayed directly).", obj(json!({}), &[])),
         tool_def("unwatch", "Stop a stock watch by number, or 'all'.", obj(json!({ "which": { "type": "string" } }), &["which"])),
         tool_def("wake_machine", "Wake one of the user's registered machines via Wake-on-LAN. Omit the name when only one is registered.", obj(json!({ "name": { "type": "string" } }), &[])),
+        // ---- web ----
+        tool_def("web_search", "Search the web for current information (news, prices, opening hours, facts you don't know). Returns titles, URLs and snippets; call read_page on a result when the snippet isn't enough.", obj(json!({ "query": { "type": "string" } }), &["query"])),
+        tool_def("read_page", "Fetch a web page and return its readable text (first few thousand characters).", obj(json!({ "url": { "type": "string" } }), &["url"])),
         // ---- settings ----
         tool_def("set_timezone", "Set the user's IANA timezone, e.g. 'Europe/Berlin'.", obj(json!({ "tz": { "type": "string" } }), &["tz"])),
         tool_def("show_settings", "Show the assistant's settings: the user's name, timezone, categories, machines, voice vocabulary, paired chats (displayed directly).", obj(json!({}), &[])),
@@ -237,6 +240,14 @@ pub(super) async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: 
                 Err(_) => observe(format!("'{name}' is not a valid IANA timezone.")),
             }
         }
+        "web_search" => match crate::web::search(&s("query"), 6).await {
+            Ok(hits) => observe(crate::web::render(&hits)),
+            Err(e) => observe(format!("Search failed: {e}")),
+        },
+        "read_page" => match crate::web::read_page(&s("url"), 6000).await {
+            Ok(text) => observe(text),
+            Err(e) => observe(format!("Couldn't read that page: {e}")),
+        },
         "show_settings" => display(settings_reply(state, chat_id)),
         "set_name" => {
             let n = s("name");
@@ -310,6 +321,8 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
            Extract amounts, dates, names yourself; ask a question only when a required detail is genuinely missing.\n\
          - Before answering questions about people, plans, preferences or anything not visible in this conversation, call `recall`. \
            Use `remember` when the user tells you something worth keeping.\n\
+         - For anything current or outside your knowledge (news, prices, weather, hours, recent events), call `web_search`, \
+           then `read_page` on the best hit if the snippets aren't enough; mention the source URL in your answer.\n\
          - When a tool says it was displayed to the user, do not repeat its contents; reply with one short sentence or nothing at all.\n\
          - Confirmations for destructive actions are handled by buttons; never assume they were tapped.\n\
          - Voice transcripts arrive as plain text; if one is clearly a thought-dump rather than a request, use `save_memo`.\n\
