@@ -67,7 +67,8 @@ later by saying "use paid models" / "use free models":
   `anthropic/claude-sonnet-5` (**strong**), or `anthropic/claude-opus-5` (**max**) for genuinely hard problems or
   when you ask for the best model. Everyday tasks, notes and money never leave the cheap rung. A fourth, separate
   lane, `x-ai/grok-4.6` (**unsafe**, unmoderated on OpenRouter, still supports tools), is used only when the owner
-  explicitly asks in a message ("use the unsafe model for this"); the agent never picks it on its own.
+  explicitly asks. Routing is decided in code, not by the model: "escalate to unsafe", "use opus" or "switch to
+  sonnet" pin the chat to that rung until "back to normal", and an `unsafe:` prefix routes a single message.
 
 Free models cost nothing but are rate-limited (about 50 requests a day, 1000 once the account has ever bought $10
 of credits), slower, and weaker at tool calling; voice and receipts are best-effort. Free model ids rotate on

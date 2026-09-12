@@ -7,10 +7,6 @@ use super::*;
 use crate::config;
 use crate::memory;
 
-pub(super) fn agent_model() -> String {
-    crate::llm::agent()
-}
-
 /// Hard cap on tool round-trips per message, so a confused model can't loop forever.
 pub(super) const AGENT_MAX_STEPS: usize = 8;
 
@@ -317,6 +313,11 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
     let cats = crate::vault::categories().iter().map(|(n, h)| format!("{n} ({h})")).collect::<Vec<_>>().join("; ");
     let name = { let n = config::chat_name(chat_id); if n.is_empty() { config::owner_name() } else { n } };
     let who = if name.is_empty() { String::new() } else { format!(" The user's name is {name}.") };
+    let routed = match crate::llm::route(chat_id).as_deref() {
+        Some("unsafe") => " This chat is routed to a low-guardrail model at the owner's explicit request; answer directly.",
+        Some(r) => { let _ = r; " This chat is pinned to a stronger model at the owner's request." }
+        None => "",
+    };
     let machines = config::machines();
     let machines = if machines.is_empty() {
         "No machines are registered for Wake-on-LAN (offer add_machine if asked to wake one).".to_string()
@@ -324,7 +325,7 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
         format!("Machines you can wake: {}.", machines.iter().map(|m| m.name.clone()).collect::<Vec<_>>().join(", "))
     };
     format!(
-        "You are Optimimer, the personal assistant of ONE user, chatting over Telegram. Now: {now} ({tz}).{who}\n\
+        "You are Optimimer, the personal assistant of ONE user, chatting over Telegram. Now: {now} ({tz}).{who}{routed}\n\
          You act through tools: tasks, notes and memos live as Markdown files in the user's Obsidian vault; money in a ledger; \
          plus shopping lists, reminders, email, stock watches, machines, settings, and long-term memory. \
          Task/note categories: {cats}. {machines}\n\
@@ -351,6 +352,11 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
 /// Run one user message through the agent. Returns `None` when the model has
 /// nothing to add (everything was displayed by tools).
 pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotState, chat_id: i64, user_text: &str) -> Option<Reply> {
+    run_agent_routed(client, api, state, chat_id, user_text, None).await
+}
+
+/// `route` overrides the chat's stored route for this one turn ("unsafe: …" prefix).
+pub(super) async fn run_agent_routed(client: &reqwest::Client, api: &str, state: &BotState, chat_id: i64, user_text: &str, route: Option<&str>) -> Option<Reply> {
     let mem = memory::global();
     let user_id = mem.add_message(chat_id, "user", user_text);
     // "typing…" only lasts ~5s per call; keep it alive for as long as the model takes.
@@ -386,9 +392,13 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
     // What tools actually saved this turn — handed to the memory extractor so it
     // doesn't restate a task/note/expense as a "fact".
     let mut recorded: Vec<String> = Vec::new();
-    // Start cheap; the model can climb to `strong` and then `max` mid-turn.
-    let mut model = agent_model();
-    let mut rung = 0u8;
+    // Start on the chat's route (everyday model unless the owner pinned one);
+    // the model can still climb to `strong` and then `max` mid-turn.
+    let stored_route = crate::llm::route(chat_id);
+    let (mut model, mut rung) = crate::llm::model_for_route(route.or(stored_route.as_deref()));
+    if rung > 0 {
+        tracing::info!("turn routed to {model}");
+    }
     for step in 0..AGENT_MAX_STEPS {
         let msg = match crate::openrouter::chat_tools(&model, &messages, &tools).await {
             Ok(m) => m,

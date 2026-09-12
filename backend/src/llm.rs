@@ -116,6 +116,34 @@ pub fn ocr() -> String { pick("OCR_MODEL", |s| s.ocr) }
 pub fn transcribe() -> String { pick("TRANSCRIBE_MODEL", |s| s.transcribe) }
 pub fn shopper() -> String { pick("SHOPPER_MODEL", |s| s.shopper) }
 
+// ---- per-chat route --------------------------------------------------------
+// The owner can pin a chat to a rung ("escalate to unsafe", "use opus") until
+// they say "back to normal". Stored as settings key `route:<chat_id>`.
+
+/// Where a chat is routed: None = the everyday model.
+pub fn route(chat_id: i64) -> Option<String> {
+    config::stored(&format!("route:{chat_id}")).filter(|r| matches!(r.as_str(), "strong" | "max" | "unsafe"))
+}
+
+pub fn set_route(chat_id: i64, route: Option<&str>) {
+    let key = format!("route:{chat_id}");
+    match route {
+        Some(r) => config::set(&key, r),
+        None => config::unset(&key),
+    }
+}
+
+/// The model a chat's turn starts on, and the ladder rung that corresponds to
+/// it (0 everyday, 1 strong, 2 max, 3 unsafe) so `escalate` never steps down.
+pub fn model_for_route(route: Option<&str>) -> (String, u8) {
+    match route {
+        Some("strong") => (strong(), 1),
+        Some("max") => (max(), 2),
+        Some("unsafe") => (lax(), 3),
+        _ => (agent(), 0),
+    }
+}
+
 /// A workflow node's `model` field: a placeholder follows the tier, anything
 /// else is a literal OpenRouter id.
 pub fn resolve(spec: &str) -> String {

@@ -359,12 +359,37 @@ pub async fn run_bot(store: Store, db: Db) {
                 ))).await;
                 continue;
             }
+            // "escalate to unsafe" / "use opus" / "back to normal": pin this chat
+            // to a rung, in code, so the everyday model can't second-guess it.
+            if let Some(route) = route_request(&text) {
+                let reply = if route == Some("unsafe") && !state.is_owner(chat_id) {
+                    "Only the owner can route a chat to the unsafe model.".to_string()
+                } else {
+                    crate::llm::set_route(chat_id, route);
+                    let (model, _) = crate::llm::model_for_route(route);
+                    match route {
+                        Some(r) => format!("Routing this chat to {model} ({r}) until you say \"back to normal\"."),
+                        None => format!("Back to normal — {model}."),
+                    }
+                };
+                send(&client, &api, chat_id, &Reply::text(reply)).await;
+                continue;
+            }
+            // "unsafe: <message>" — one message on the low-guardrail model, no mode change.
+            let (once, text) = match text.strip_prefix("unsafe:").or_else(|| text.strip_prefix("Unsafe:")) {
+                Some(rest) if state.is_owner(chat_id) => (Some("unsafe"), rest.trim().to_string()),
+                _ => (None, text),
+            };
+            if text.is_empty() {
+                continue;
+            }
+
             // Off the polling loop: other chats (and pins, buttons, forwards)
             // keep flowing while this turn waits on the model.
             let (client, api, state) = (client.clone(), api.clone(), state.clone());
             tokio::spawn(async move {
                 let _turn = state.turn_lock(chat_id).lock_owned().await;
-                if let Some(reply) = run_agent(&client, &api, &state, chat_id, &text).await {
+                if let Some(reply) = run_agent_routed(&client, &api, &state, chat_id, &text, once).await {
                     send(&client, &api, chat_id, &reply).await;
                 }
             });
@@ -379,6 +404,51 @@ fn is_clear_request(text: &str) -> bool {
         t.as_str(),
         "clear" | "clear context" | "clear the context" | "clear chat" | "new chat" | "new conversation" | "start over" | "reset" | "reset context" | "fresh start" | "forget this conversation"
     )
+}
+
+/// A short instruction to pin this chat to a model rung, or to unpin it.
+/// `Some(Some(rung))` pins, `Some(None)` returns to normal, `None` = not a routing request.
+/// Deliberately strict: a verb (escalate/switch/route/set/go/pin) must come before the
+/// rung word, and the message must be short, so ordinary sentences never match.
+fn route_request(text: &str) -> Option<Option<&'static str>> {
+    let t = text.trim().trim_end_matches(['.', '!']).to_lowercase();
+    if t.split_whitespace().count() > 10 {
+        return None;
+    }
+    let back = ["back to normal", "back to safe", "normal mode", "safe mode", "default model", "stop unsafe", "normal model"];
+    if back.iter().any(|p| t.contains(p)) {
+        return Some(None);
+    }
+    let verbs = ["escalate", "switch", "route", "set", "go", "pin", "use"];
+    let verb_at = verbs.iter().filter_map(|v| t.find(v)).min()?;
+    let after = &t[verb_at..];
+    let rung = if after.contains("unsafe") || after.contains("grok") || after.contains("uncensored") {
+        "unsafe"
+    } else if after.contains("opus") || after.contains(" max") || after.ends_with("max") {
+        "max"
+    } else if after.contains("sonnet") || after.contains("strong") {
+        "strong"
+    } else {
+        return None;
+    };
+    Some(Some(rung))
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::route_request;
+
+    #[test]
+    fn routing_phrases() {
+        assert_eq!(route_request("lets escalate convo to unsafe (grok)"), Some(Some("unsafe")));
+        assert_eq!(route_request("switch to grok"), Some(Some("unsafe")));
+        assert_eq!(route_request("use opus"), Some(Some("max")));
+        assert_eq!(route_request("escalate to sonnet please"), Some(Some("strong")));
+        assert_eq!(route_request("back to normal"), Some(None));
+        assert_eq!(route_request("is it unsafe to use this charger?"), None, "rung word before the verb");
+        assert_eq!(route_request("remind me to set the table"), None);
+        assert_eq!(route_request("please switch the light off and tell me if grok is a good name for a dog or not at all"), None, "too long");
+    }
 }
 
 /// Long-poll for updates. `timeout_secs` is Telegram's server-side wait; it

@@ -36,6 +36,7 @@ What you can ask for, by area:
 | Machines | "wake the desktop", "add machine nas aa:bb:cc:dd:ee:ff", "remove machine nas" |
 | Memory | "remember that Sam prefers mornings", "what do you know about Sam?" |
 | Context | "clear context", "new chat", "start over" — a fresh thread; memory and files stay |
+| Models | "escalate to unsafe", "use opus", "switch to sonnet" pin the chat; "back to normal" unpins |
 | Web | "what's the weather in Lisbon tomorrow?", "when does the Apple store close today?", "summarise https://…" |
 | Settings | "call me Alex", "my timezone is Europe/Berlin", "show settings", "run setup again", "use paid models" |
 | People | "invite someone", "remove Sam" |
