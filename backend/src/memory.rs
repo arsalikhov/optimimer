@@ -67,6 +67,12 @@ fn model() -> String {
     crate::llm::memory()
 }
 
+/// Message id below which this chat's turns are hidden from the agent (see
+/// `clear_context`); 0 when the thread was never cleared.
+fn context_cutoff(chat_id: i64) -> i64 {
+    crate::config::stored(&format!("context_cutoff:{chat_id}")).and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
 fn norm(s: &str) -> String {
     s.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -103,10 +109,11 @@ impl Memory {
 
     /// The last `n` turns, oldest first.
     pub fn recent_messages(&self, chat_id: i64, n: usize) -> Vec<(String, String)> {
+        let cutoff = context_cutoff(chat_id);
         let conn = self.db.lock();
-        let Ok(mut stmt) = conn.prepare("SELECT role, text FROM chat_messages WHERE chat_id = ?1 ORDER BY id DESC LIMIT ?2") else { return vec![] };
+        let Ok(mut stmt) = conn.prepare("SELECT role, text FROM chat_messages WHERE chat_id = ?1 AND id > ?3 ORDER BY id DESC LIMIT ?2") else { return vec![] };
         let mut v: Vec<(String, String)> = stmt
-            .query_map(params![chat_id, n as i64], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_map(params![chat_id, n as i64, cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default();
         v.reverse();
@@ -117,6 +124,26 @@ impl Memory {
         let conn = self.db.lock();
         conn.query_row("SELECT summary, upto_id FROM chat_summaries WHERE chat_id = ?1", params![chat_id], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap_or_default()
+    }
+
+    /// Start a fresh thread: everything said so far drops out of the agent's
+    /// context (window and rolling summary), while the messages stay stored and
+    /// the knowledge graph, tasks and notes are untouched. Returns how many
+    /// turns were hidden.
+    pub fn clear_context(&self, chat_id: i64) -> usize {
+        let (max_id, hidden): (i64, i64) = {
+            let conn = self.db.lock();
+            let cutoff = context_cutoff(chat_id);
+            conn.query_row(
+                "SELECT COALESCE(MAX(id), 0), COUNT(*) FROM chat_messages WHERE chat_id = ?1 AND id > ?2",
+                params![chat_id, cutoff],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0))
+        };
+        crate::config::set(&format!("context_cutoff:{chat_id}"), &max_id.to_string());
+        self.set_summary(chat_id, "", max_id);
+        hidden as usize
     }
 
     fn set_summary(&self, chat_id: i64, summary: &str, upto_id: i64) {

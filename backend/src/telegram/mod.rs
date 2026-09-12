@@ -338,6 +338,17 @@ pub async fn run_bot(store: Store, db: Db) {
             if text.is_empty() {
                 continue;
             }
+
+            // "clear context" / "new chat": handled here, deterministically, so it
+            // works even when the model is slow or down.
+            if is_clear_request(&text) {
+                state.pending.lock().unwrap().remove(&chat_id);
+                let n = crate::memory::global().clear_context(chat_id);
+                send(&client, &api, chat_id, &Reply::text(format!(
+                    "Fresh start — I've set aside this conversation ({n} turns). Long-term memory, tasks, notes and money are untouched."
+                ))).await;
+                continue;
+            }
             // Off the polling loop: other chats (and pins, buttons, forwards)
             // keep flowing while this turn waits on the model.
             let (client, api, state) = (client.clone(), api.clone(), state.clone());
@@ -349,6 +360,15 @@ pub async fn run_bot(store: Store, db: Db) {
             });
         }
     }
+}
+
+/// Short, unambiguous ways of asking for a fresh thread.
+fn is_clear_request(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(['.', '!']).to_lowercase();
+    matches!(
+        t.as_str(),
+        "clear" | "clear context" | "clear the context" | "clear chat" | "new chat" | "new conversation" | "start over" | "reset" | "reset context" | "fresh start" | "forget this conversation"
+    )
 }
 
 /// Long-poll for updates. `timeout_secs` is Telegram's server-side wait; it

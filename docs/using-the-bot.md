@@ -35,6 +35,7 @@ What you can ask for, by area:
 | Stock watches | "watch <url>", "my watches", "stop watching 2" |
 | Machines | "wake the desktop", "add machine nas aa:bb:cc:dd:ee:ff", "remove machine nas" |
 | Memory | "remember that Sam prefers mornings", "what do you know about Sam?" |
+| Context | "clear context", "new chat", "start over" — a fresh thread; memory and files stay |
 | Web | "what's the weather in Lisbon tomorrow?", "when does the Apple store close today?", "summarise https://…" |
 | Settings | "call me Alex", "my timezone is Europe/Berlin", "show settings", "run setup again", "use paid models" |
 | People | "invite someone", "remove Sam" |

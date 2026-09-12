@@ -9,6 +9,10 @@ graph** in SQLite: nodes with a name, kind and one-line summary (full-text index
 Tasks and notes the bot creates join the graph too, so a person links to the task that mentions them. Your
 categories are seeded as nodes and are never re-created as projects.
 
+Say "clear context" (or "new chat", "start over") to begin a fresh thread: everything said so far drops out of
+the window and the rolling summary, while the knowledge graph, tasks, notes and ledger stay. The old turns are kept
+in the database, just hidden from the agent.
+
 The agent calls `recall` before answering anything about people, plans or preferences it cannot see in the recent
 turns. Recall runs a full-text search (all terms, then any term, with prefix matching), adds one hop of neighbours,
 and returns a compact block of a couple of thousand characters at most. Saying "remember that …" stores a fact

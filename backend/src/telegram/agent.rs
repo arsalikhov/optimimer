@@ -95,6 +95,8 @@ pub(super) fn agent_tools() -> Value {
         tool_def("list_watches", "Show active stock watches (displayed directly).", obj(json!({}), &[])),
         tool_def("unwatch", "Stop a stock watch by number, or 'all'.", obj(json!({ "which": { "type": "string" } }), &["which"])),
         tool_def("wake_machine", "Wake one of the user's registered machines via Wake-on-LAN. Omit the name when only one is registered.", obj(json!({ "name": { "type": "string" } }), &[])),
+        // ---- context ----
+        tool_def("clear_context", "Start a fresh conversation thread: everything said so far drops out of your context. Only when the user asks to clear, reset or start over; long-term memory and files are untouched.", obj(json!({}), &[])),
         // ---- escalation ----
         tool_def("escalate", "Hand this turn to a different model and continue. 'strong' when the request needs careful multi-step reasoning, planning, tricky maths/code, or your first attempt came out wrong; 'max' only for genuinely hard problems or when the user explicitly asks for the best model; 'unsafe' switches to a model with minimal content guardrails — ONLY when the user explicitly asks for it (e.g. 'use the unsafe model', 'unsafe:'), never on your own judgement.", obj(json!({
             "level": { "type": "string", "enum": ["strong", "max", "unsafe"] },
@@ -244,6 +246,11 @@ pub(super) async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: 
                 }
                 Err(_) => observe(format!("'{name}' is not a valid IANA timezone.")),
             }
+        }
+        "clear_context" => {
+            state.pending.lock().unwrap().remove(&chat_id);
+            let n = memory::global().clear_context(chat_id);
+            observe(format!("(context cleared — {n} turns set aside; reply with one short line confirming a fresh start)"))
         }
         "web_search" => match crate::web::search(&s("query"), 6).await {
             Ok(hits) => observe(crate::web::render(&hits)),
