@@ -46,6 +46,9 @@ struct Set {
     strong: &'static str,
     /// The top of the ladder, for genuinely hard problems (`escalate("max")`).
     max: &'static str,
+    /// A model with minimal content guardrails (`escalate("unsafe")`, owner only,
+    /// only when the user explicitly asks). Must support tool calling.
+    lax: &'static str,
     /// Strict JSON parsers (tasks, notes, money, CSV rows, summaries).
     parser: &'static str,
     /// Cheap background work (memory extraction, reminders, email drafts).
@@ -62,6 +65,8 @@ const FREE: Set = Set {
     agent: "nvidia/nemotron-3-super-120b-a12b:free",
     strong: "nvidia/nemotron-3-ultra-550b-a55b:free",
     max: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    // No free unmoderated model with tool calling exists; stays on the agent model.
+    lax: "nvidia/nemotron-3-super-120b-a12b:free",
     parser: "nvidia/nemotron-3-super-120b-a12b:free",
     cheap: "nvidia/nemotron-3.5-lightning:free",
     ocr: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -76,6 +81,9 @@ const PAID: Set = Set {
     agent: "anthropic/claude-haiku-4.5",
     strong: "anthropic/claude-sonnet-5",
     max: "anthropic/claude-opus-5",
+    // Unmoderated on OpenRouter and supports tools ($2/$6); the others in that
+    // category (Dolphin, Hermes, …) can't call tools, so the turn would die.
+    lax: "x-ai/grok-4.6",
     parser: "google/gemini-3.1-flash-lite",
     cheap: "google/gemini-3.1-flash-lite",
     ocr: "anthropic/claude-haiku-4.5",
@@ -98,6 +106,7 @@ fn pick(env: &str, role: fn(&Set) -> &'static str) -> String {
 pub fn agent() -> String { pick("AGENT_MODEL", |s| s.agent) }
 pub fn strong() -> String { pick("STRONG_MODEL", |s| s.strong) }
 pub fn max() -> String { pick("MAX_MODEL", |s| s.max) }
+pub fn lax() -> String { pick("UNSAFE_MODEL", |s| s.lax) }
 pub fn parser() -> String { pick("PARSER_MODEL", |s| s.parser) }
 pub fn memory() -> String { pick("MEMORY_MODEL", |s| s.cheap) }
 /// Summaries and CSV classification read like the agent's work: agent-grade model.
@@ -122,9 +131,9 @@ pub fn resolve(spec: &str) -> String {
 pub fn describe() -> String {
     let base = match tier() {
         Tier::Free => "free (OpenRouter's free Nemotron models — no credits needed, weaker)".to_string(),
-        Tier::Paid => format!("paid ({} everyday, {} when escalated, {} at most; {} for parsing)", agent(), strong(), max(), parser()),
+        Tier::Paid => format!("paid ({} everyday, {} when escalated, {} at most, {} on request as 'unsafe'; {} for parsing)", agent(), strong(), max(), lax(), parser()),
     };
-    let pinned: Vec<String> = ["AGENT_MODEL", "STRONG_MODEL", "MAX_MODEL", "PARSER_MODEL", "MEMORY_MODEL", "CONVO_MODEL", "FINANCE_MODEL", "OCR_MODEL", "TRANSCRIBE_MODEL", "SHOPPER_MODEL"]
+    let pinned: Vec<String> = ["AGENT_MODEL", "STRONG_MODEL", "MAX_MODEL", "UNSAFE_MODEL", "PARSER_MODEL", "MEMORY_MODEL", "CONVO_MODEL", "FINANCE_MODEL", "OCR_MODEL", "TRANSCRIBE_MODEL", "SHOPPER_MODEL"]
         .iter()
         .filter_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()).map(|v| format!("{k}={v}")))
         .collect();

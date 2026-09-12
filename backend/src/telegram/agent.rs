@@ -96,8 +96,8 @@ pub(super) fn agent_tools() -> Value {
         tool_def("unwatch", "Stop a stock watch by number, or 'all'.", obj(json!({ "which": { "type": "string" } }), &["which"])),
         tool_def("wake_machine", "Wake one of the user's registered machines via Wake-on-LAN. Omit the name when only one is registered.", obj(json!({ "name": { "type": "string" } }), &[])),
         // ---- escalation ----
-        tool_def("escalate", "Hand this turn to a stronger (more expensive) model and continue. Use 'strong' when the request needs careful multi-step reasoning, planning, tricky maths/code, or your first attempt came out wrong; use 'max' only for genuinely hard problems or when the user explicitly asks for the best model.", obj(json!({
-            "level": { "type": "string", "enum": ["strong", "max"] },
+        tool_def("escalate", "Hand this turn to a different model and continue. 'strong' when the request needs careful multi-step reasoning, planning, tricky maths/code, or your first attempt came out wrong; 'max' only for genuinely hard problems or when the user explicitly asks for the best model; 'unsafe' switches to a model with minimal content guardrails — ONLY when the user explicitly asks for it (e.g. 'use the unsafe model', 'unsafe:'), never on your own judgement.", obj(json!({
+            "level": { "type": "string", "enum": ["strong", "max", "unsafe"] },
             "reason": { "type": "string", "description": "one short phrase" }
         }), &["level"])),
         // ---- web ----
@@ -331,7 +331,8 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
          - You start on a fast, inexpensive model. For requests that need real reasoning — multi-step planning, tricky \
            maths or code, subtle judgement, or when your first attempt came out wrong — call `escalate` with level \
            'strong' and continue; 'max' only for genuinely hard problems or when the user asks for the best model. \
-           Everyday tasks, notes, money and lookups never need it.\n\
+           Everyday tasks, notes, money and lookups never need it. 'unsafe' (a low-guardrail model) is only ever used \
+           when the user explicitly asks for it in that message.\n\
          - When a tool says it was displayed to the user, do not repeat its contents; reply with one short sentence or nothing at all.\n\
          - Confirmations for destructive actions are handled by buttons; never assume they were tapped.\n\
          - Voice transcripts arrive as plain text; if one is clearly a thought-dump rather than a request, use `save_memo`.\n\
@@ -401,6 +402,18 @@ pub(super) async fn run_agent(client: &reqwest::Client, api: &str, state: &BotSt
             let cargs: Value = call["function"]["arguments"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| json!({}));
             tracing::info!("agent tool {name} {}", cargs);
             if name == "escalate" {
+                if cargs["level"].as_str() == Some("unsafe") {
+                    let text = if !state.is_owner(chat_id) {
+                        "(the unsafe model is owner-only; carry on as you are)".to_string()
+                    } else {
+                        model = crate::llm::lax();
+                        rung = 3;
+                        tracing::info!("agent switched to the unsafe model {model} at the user's request");
+                        format!("(now running on {model}, a low-guardrail model, for the rest of this turn; carry on)")
+                    };
+                    messages.push(json!({ "role": "tool", "tool_call_id": id, "content": text }));
+                    continue;
+                }
                 let want = if cargs["level"].as_str() == Some("max") { 2 } else { 1 };
                 let text = if want > rung {
                     rung = want;

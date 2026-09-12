@@ -65,7 +65,9 @@ later by saying "use paid models" / "use free models":
   the strict parsers, memory, reminders and stock watches; `mistralai/voxtral-small-24b-2507` for voice. When the
   agent judges a request needs real reasoning it calls `escalate` and the turn continues on
   `anthropic/claude-sonnet-5` (**strong**), or `anthropic/claude-opus-5` (**max**) for genuinely hard problems or
-  when you ask for the best model. Everyday tasks, notes and money never leave the cheap rung.
+  when you ask for the best model. Everyday tasks, notes and money never leave the cheap rung. A fourth, separate
+  lane, `x-ai/grok-4.6` (**unsafe**, unmoderated on OpenRouter, still supports tools), is used only when the owner
+  explicitly asks in a message ("use the unsafe model for this"); the agent never picks it on its own.
 
 Free models cost nothing but are rate-limited (about 50 requests a day, 1000 once the account has ever bought $10
 of credits), slower, and weaker at tool calling; voice and receipts are best-effort. Free model ids rotate on
@@ -77,6 +79,7 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 | `AGENT_MODEL` | tier default | The conversational agent's everyday model; must support tool calling. |
 | `STRONG_MODEL` | tier default | Where `escalate("strong")` goes. |
 | `MAX_MODEL` | tier default | Where `escalate("max")` goes. |
+| `UNSAFE_MODEL` | tier default | Where `escalate("unsafe")` goes; must support tool calling or the turn fails. |
 | `PARSER_MODEL` | tier default | Strict JSON parsers (tasks, notes, money). |
 | `MEMORY_MODEL` | tier default | Fact extraction and summary folding. |
 | `CONVO_MODEL` | tier default | Summaries of forwarded batches and voice memos. |
