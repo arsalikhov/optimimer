@@ -205,6 +205,16 @@ pub async fn run_bot(store: Store, db: Db) {
                 Some(c) => c,
                 None => continue,
             };
+            // One line per update (kind + size, never the content) so a stall is visible in the log.
+            {
+                let kind = ["text", "voice", "audio", "video_note", "photo", "document", "location"]
+                    .iter()
+                    .find(|k| msg.get(**k).map(|v| !v.is_null()).unwrap_or(false))
+                    .copied()
+                    .unwrap_or("other");
+                let size = msg["text"].as_str().map(|t| t.chars().count()).unwrap_or(0);
+                tracing::info!("update from chat {chat_id}: {kind}{}", if size > 0 { format!(" ({size} chars)") } else { String::new() });
+            }
 
             // Authorization gate. An unknown chat's only move is to pair: the
             // setup code makes it the owner, an invite code a member. Anything

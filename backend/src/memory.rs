@@ -131,9 +131,11 @@ impl Memory {
     /// the knowledge graph, tasks and notes are untouched. Returns how many
     /// turns were hidden.
     pub fn clear_context(&self, chat_id: i64) -> usize {
+        // Read the setting BEFORE taking the connection: the settings table
+        // lives behind the same (non-reentrant) lock.
+        let cutoff = context_cutoff(chat_id);
         let (max_id, hidden): (i64, i64) = {
             let conn = self.db.lock();
-            let cutoff = context_cutoff(chat_id);
             conn.query_row(
                 "SELECT COALESCE(MAX(id), 0), COUNT(*) FROM chat_messages WHERE chat_id = ?1 AND id > ?2",
                 params![chat_id, cutoff],
@@ -601,5 +603,27 @@ mod tests {
         assert!(r.contains("[person] Dr Lee"), "{r}");
         assert!(r.contains("works at → [place] Bank Street clinic"), "{r}");
         assert!(r.len() < 2600);
+    }
+}
+
+#[cfg(test)]
+mod clear_ctx_tests {
+    use super::*;
+
+    #[test]
+    fn clear_context_hides_old_turns_and_does_not_deadlock() {
+        let db = crate::db::Db::memory().unwrap();
+        crate::config::init(db.clone());
+        let m = Memory { db };
+        m.add_message(5, "user", "one");
+        m.add_message(5, "assistant", "two");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let m2 = m.clone();
+        std::thread::spawn(move || { let n = m2.clear_context(5); tx.send(n).unwrap(); });
+        let n = rx.recv_timeout(std::time::Duration::from_secs(3)).expect("clear_context deadlocked");
+        assert_eq!(n, 2);
+        assert!(m.recent_messages(5, 10).is_empty());
+        m.add_message(5, "user", "three");
+        assert_eq!(m.recent_messages(5, 10).len(), 1);
     }
 }
