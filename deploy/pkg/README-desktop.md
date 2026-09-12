@@ -6,7 +6,7 @@
    to allow it under Privacy & Security the first time).
 3. The first run asks three questions right in the window: your Telegram bot token (from @BotFather), your OpenRouter
    API key (free models work with no credits; leave blank for offline mock mode), and your timezone. The answers are
-   saved to a `.env` file next to the binary; delete that file to answer again.
+   saved to a `.env` file next to the binary; run it with `--setup` (or delete that file) to answer again.
 4. A **setup code** is printed in a box. Send it to your bot from Telegram to pair as the owner; the bot then asks
    your name, timezone, categories and which models to use.
 

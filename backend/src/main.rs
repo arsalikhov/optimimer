@@ -40,6 +40,10 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("optimimer-backend {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // .env from the working dir or next to the binary; on a bare download with
     // nothing configured, ask the three questions right here.
     setup::load_env();
@@ -53,6 +57,7 @@ async fn main() {
         .with_ansi(setup::ansi_ok())
         .with_target(false)
         .init();
+    tracing::info!("optimimer-backend {} starting", env!("CARGO_PKG_VERSION"));
 
     // One SQLite database holds all persistent state (agents, timezones,
     // schedules, shopping lists). Override the location with OPTIMIMER_DB.
