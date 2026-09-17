@@ -516,7 +516,7 @@ pub fn render_gantt(tasks: &[crate::vault::Doc]) -> String {
         shown += 1;
     }
 
-    // No heading of its own: Home.md embeds the whole note, and a section embed
+    // No heading of its own: Home.canvas embeds the whole note, and a section embed
     // would repeat the heading. Provenance goes in frontmatter instead.
     let mut out = String::from("---\ntitle: Gantt\ntype: dashboard\ngenerated: Optimimer — from tasks/, do not edit; bars run created→due, red = overdue\n---\n\n");
     if shown == 0 {

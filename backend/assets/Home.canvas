@@ -1,0 +1,202 @@
+{
+	"nodes": [
+		{
+			"id": "home-header",
+			"type": "text",
+			"x": 0,
+			"y": -240,
+			"width": 1860,
+			"height": 120,
+			"text": "# Home\n\nCaptured from Telegram by Optimimer. Each card is a live view; open the `.base` file for the rest of its views."
+		},
+		{
+			"id": "g-today",
+			"type": "group",
+			"x": -24,
+			"y": -68,
+			"width": 948,
+			"height": 612,
+			"label": "Today",
+			"color": "4"
+		},
+		{
+			"id": "today",
+			"type": "file",
+			"x": 0,
+			"y": 0,
+			"width": 900,
+			"height": 520,
+			"file": "Tasks.base",
+			"subpath": "#Today"
+		},
+		{
+			"id": "g-by-category",
+			"type": "group",
+			"x": 936,
+			"y": -68,
+			"width": 948,
+			"height": 612,
+			"label": "Open tasks by category",
+			"color": "4"
+		},
+		{
+			"id": "by-category",
+			"type": "file",
+			"x": 960,
+			"y": 0,
+			"width": 900,
+			"height": 520,
+			"file": "Tasks.base",
+			"subpath": "#By category"
+		},
+		{
+			"id": "g-timeline",
+			"type": "group",
+			"x": -24,
+			"y": 604,
+			"width": 1908,
+			"height": 612,
+			"label": "Timeline",
+			"color": "4"
+		},
+		{
+			"id": "timeline",
+			"type": "file",
+			"x": 0,
+			"y": 672,
+			"width": 1860,
+			"height": 520,
+			"file": "Gantt.md"
+		},
+		{
+			"id": "g-inbox",
+			"type": "group",
+			"x": -24,
+			"y": 1276,
+			"width": 948,
+			"height": 612,
+			"label": "Inbox",
+			"color": "5"
+		},
+		{
+			"id": "inbox",
+			"type": "file",
+			"x": 0,
+			"y": 1344,
+			"width": 900,
+			"height": 520,
+			"file": "Notes.base",
+			"subpath": "#Inbox"
+		},
+		{
+			"id": "g-money-month",
+			"type": "group",
+			"x": 936,
+			"y": 1276,
+			"width": 948,
+			"height": 612,
+			"label": "Money this month",
+			"color": "2"
+		},
+		{
+			"id": "money-month",
+			"type": "file",
+			"x": 960,
+			"y": 1344,
+			"width": 900,
+			"height": 520,
+			"file": "Finances.base",
+			"subpath": "#This month"
+		},
+		{
+			"id": "g-chart-income",
+			"type": "group",
+			"x": -24,
+			"y": 1948,
+			"width": 628,
+			"height": 552,
+			"label": "Income vs spending",
+			"color": "2"
+		},
+		{
+			"id": "chart-income",
+			"type": "file",
+			"x": 0,
+			"y": 2016,
+			"width": 580,
+			"height": 460,
+			"file": "Charts.md",
+			"subpath": "#Income vs spending"
+		},
+		{
+			"id": "g-chart-flow",
+			"type": "group",
+			"x": 616,
+			"y": 1948,
+			"width": 628,
+			"height": 552,
+			"label": "Money flow",
+			"color": "2"
+		},
+		{
+			"id": "chart-flow",
+			"type": "file",
+			"x": 640,
+			"y": 2016,
+			"width": 580,
+			"height": 460,
+			"file": "Charts.md",
+			"subpath": "#Money flow"
+		},
+		{
+			"id": "g-chart-spend",
+			"type": "group",
+			"x": 1256,
+			"y": 1948,
+			"width": 628,
+			"height": 552,
+			"label": "Spending by category",
+			"color": "2"
+		},
+		{
+			"id": "chart-spend",
+			"type": "file",
+			"x": 1280,
+			"y": 2016,
+			"width": 580,
+			"height": 460,
+			"file": "Charts.md",
+			"subpath": "#Spending by category"
+		},
+		{
+			"id": "g-summaries",
+			"type": "group",
+			"x": -24,
+			"y": 2560,
+			"width": 1908,
+			"height": 612,
+			"label": "Recent summaries",
+			"color": "6"
+		},
+		{
+			"id": "summaries",
+			"type": "file",
+			"x": 0,
+			"y": 2628,
+			"width": 1860,
+			"height": 520,
+			"file": "Summaries.base",
+			"subpath": "#Recent"
+		},
+		{
+			"id": "home-footer",
+			"type": "text",
+			"x": 0,
+			"y": 3264,
+			"width": 1860,
+			"height": 80,
+			"text": "*Full views: [[Tasks.base]] \u00b7 [[Notes.base]] \u00b7 [[Finances.base]] \u00b7 [[Summaries.base]] \u00b7 [[Memory.base]] \u00b7 [[Charts]] \u00b7 [[Gantt]]*"
+		}
+	],
+	"edges": []
+}

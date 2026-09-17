@@ -25,7 +25,7 @@ flagged ⚠️ in the transaction list for you to review; "remove transaction 3"
 
 "balance" shows this month's income, spending by category and net; "transactions" lists recent rows with numbers you
 can refer to. `Finances.base` in the vault has views for this month, by month, spending by category, transfers and
-flagged duplicates; `Charts.md` and the Sankey on `Home.md` are regenerated after every change (see
+flagged duplicates; `Charts.md` and the Sankey on `Home.canvas` are regenerated after every change (see
 [The vault](vault.md)).
 
 ## Starting clean
