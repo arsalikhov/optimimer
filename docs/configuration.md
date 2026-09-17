@@ -42,6 +42,8 @@ An environment variable always overrides the stored setting of the same meaning.
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `VAULT_DIR` | `vault` | Folder of Markdown files; point it at what Obsidian syncs. Relative to the working dir. |
+| `TRASH_DAYS` | `30` | How long a dropped memory stays in `trash/` before it goes for good. |
+| `MEMORY_VAULT_DELETES` | on | `off` stops a memory note deleted in Obsidian from deleting the memory. |
 
 ## Finance
 
@@ -83,6 +85,7 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 | `UNSAFE_MODEL` | tier default | Where `escalate("unsafe")` goes; must support tool calling or the turn fails. |
 | `PARSER_MODEL` | tier default | Strict JSON parsers (tasks, notes, money). |
 | `MEMORY_MODEL` | tier default | Fact extraction and summary folding. |
+| `MEMORY_SWEEP_MODEL` | `MAX_MODEL` | The weekly memory sweep (Opus on the paid tier). |
 | `CONVO_MODEL` | tier default | Summaries of forwarded batches and voice memos. |
 | `FINANCE_MODEL` | tier default | CSV statement classification. |
 | `OCR_MODEL` | tier default | Receipt photos (needs image input). |
@@ -126,6 +129,9 @@ only act when it is confident; without one, each falls back to the LLM prompt or
 | `FORWARD_NOTE_TTL_SECS` | `600` | How long "what are these about?" waits for a reply. |
 | `SHOPPER_CHECK_SECS` | `3600` | Stock re-check interval. |
 | `GANTT_REFRESH_SECS` | `600` | How often the task timeline is regenerated. |
+| `MEMORY_SWEEP` | on | `off` / `0` / `false` stops the weekly sweep; "tidy up your memory" still works. |
+| `MEMORY_SWEEP_DAYS` | `7` | Days between memory sweeps. |
+| `MEMORY_SWEEP_MAX` | `60` | Most new entries read in one sweep — the ceiling on what a run costs. |
 
 ## Web search
 

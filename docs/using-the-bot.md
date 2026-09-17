@@ -26,7 +26,8 @@ What you can ask for, by area:
 | Area | Examples |
 | ---- | -------- |
 | Tasks | "add a task: renew passport by friday", "what's open?", "done with the passport", "find the dentist task" |
-| Notes & memos | "note: ideas for the trip …", "list notes", "search notes for budget" |
+| Notes & memos | "note: ideas for the trip …", "list notes", "search notes", "what does the trip note say?" |
+| Editing | "add to the trip note that the flight is booked", "retitle it Bike fit", "that summary says Tuesday" |
 | Money | "spent 12.50 on lunch", "earned 3000 salary", "balance", "transactions", "remove transaction 3" |
 | Income | "my monthly income is 4000" |
 | Shopping | "add milk and eggs", "groceries", "shopping list", "clear the grocery list" |
@@ -34,7 +35,8 @@ What you can ask for, by area:
 | Email | "email Sam: running 10 minutes late" (needs Resend, see configuration) |
 | Stock watches | "watch <url>", "my watches", "stop watching 2" |
 | Machines | "wake the desktop", "add machine nas aa:bb:cc:dd:ee:ff", "remove machine nas" |
-| Memory | "remember that Sam prefers mornings", "what do you know about Sam?" |
+| Memory | "remember Sam prefers mornings", "what do you know about Sam?", "no, Sam moved to Lisbon", "forget that" |
+| Recovering | "what's in the bin?", "restore Sam", "you forgot that by mistake" |
 | Context | "clear context", "new chat", "start over" — a fresh thread; memory and files stay |
 | Models | "escalate to unsafe", "use opus", "switch to sonnet" pin the chat; "back to normal" unpins |
 | Web | "what's the weather in Lisbon tomorrow?", "when does the Apple store close today?", "summarise https://…" |
@@ -52,6 +54,10 @@ transcribed, summarised and saved to `summaries/` in the vault — when it opens
 note", when it is 45 seconds or longer (`VOICE_MEMO_SECS`), or when it is short but the bot cannot make a request
 out of it. Words the transcriber keeps mishearing can be taught: "for voice notes, learn the words Aqusense and
 Kubernetes".
+
+Whenever a recording is *kept* — as a note, a memo or a forwarded batch — the raw transcript is filed under
+`transcripts/` in the vault and linked to the tidied version, so you can always check what was actually said. A
+spoken command is not kept: ask it to add milk to the list and nothing but the list changes.
 
 ## Forwarded conversations
 
@@ -71,6 +77,7 @@ reply or tap *Summarize as-is*. Forwarded voice messages are transcribed into th
 | You said | Where it goes |
 | -------- | ------------- |
 | tasks, notes, memos, summaries | Markdown files in the vault (`tasks/`, `notes/`, `summaries/`) |
+| voice kept as a note or summary | the words as transcribed, in `transcripts/`, linked to it |
 | money | the SQLite ledger, mirrored to `finance/` notes and `Charts.md` |
 | facts, people, preferences | the memory graph, mirrored to `memory/` notes |
 | lists, reminders, watches, settings | SQLite only |

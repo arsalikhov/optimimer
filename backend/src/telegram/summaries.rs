@@ -117,7 +117,7 @@ async fn build_convo(state: &BotState, chat_id: i64, kind: &str, source: &str, t
             return reply;
         }
     };
-    let saved = convo::ConvoNote {
+    let mut saved = convo::ConvoNote {
         chat_id,
         kind: kind.to_string(),
         title,
@@ -129,8 +129,8 @@ async fn build_convo(state: &BotState, chat_id: i64, kind: &str, source: &str, t
         created_at: Utc::now().to_rfc3339(),
         ..Default::default()
     };
-    convo::global().add(saved.clone());
-    // The Markdown copy is what you'll actually read later — in Obsidian.
+    // The Markdown copy is what you'll actually read later — in Obsidian. Write
+    // it first so the row remembers where it went (`edit_summary` rewrites both).
     let file = crate::vault::write_summary(crate::vault::NewSummary {
         title: saved.title.clone(),
         kind: kind.to_string(),
@@ -140,6 +140,28 @@ async fn build_convo(state: &BotState, chat_id: i64, kind: &str, source: &str, t
         actions: saved.actions.clone(),
         transcript: transcript.to_string(),
     });
+    if let Ok(doc) = &file {
+        saved.file = doc.rel.clone();
+        // A recording kept as a summary also gets filed verbatim. `take_voice`
+        // covers memos the user spoke; a forwarded batch carries its own voice
+        // notes, marked 🎤 by `handle_forward` when they were transcribed.
+        let spoken = take_voice(state, chat_id).or_else(|| {
+            (kind == "forward" && transcript.contains('🎤'))
+                .then(|| VoiceTake { text: transcript.to_string(), source: source.to_string() })
+        });
+        if let Some(v) = spoken {
+            if let Err(e) = crate::vault::write_transcript(crate::vault::NewTranscript {
+                title: saved.title.clone(),
+                kind: "summary".into(),
+                source: v.source,
+                linked: doc.rel.clone(),
+                text: v.text,
+            }) {
+                tracing::warn!("vault transcript write failed: {e}");
+            }
+        }
+    }
+    convo::global().add(saved.clone());
     let tz = tz_for(state, chat_id);
     let mut reply = Reply::rich(convo::render_html(&saved, &tz), convo::render_text(&saved));
     match file {

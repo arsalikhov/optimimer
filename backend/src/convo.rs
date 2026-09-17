@@ -47,6 +47,11 @@ pub struct ConvoNote {
     pub source: String,
     #[serde(default)]
     pub created_at: String,
+    /// Vault path of the Markdown copy (without `.md`), so an edit can rewrite
+    /// both. Empty for summaries saved before the vault mirror existed, and for
+    /// the rare case where the file write failed.
+    #[serde(default)]
+    pub file: String,
 }
 
 /// SQLite-backed note store (table `convo_notes`), mirroring `Shopper`.

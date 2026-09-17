@@ -130,7 +130,11 @@ fn init_schema(conn: &Connection) -> Result<()> {
              path     TEXT NOT NULL DEFAULT '',
              mentions INTEGER NOT NULL DEFAULT 1,
              created  TEXT NOT NULL,
-             updated  TEXT NOT NULL
+             updated  TEXT NOT NULL,
+             -- When the weekly sweep last looked at this node (RFC3339, '' =
+             -- never). The sweep only reads nodes it hasn't seen, so its prompt
+             -- stays small however large the graph gets. See `crate::sweep`.
+             swept    TEXT NOT NULL DEFAULT ''
          );
          CREATE UNIQUE INDEX IF NOT EXISTS mem_nodes_norm ON mem_nodes(kind, norm);
          CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(name, summary, content='mem_nodes', content_rowid='rowid');
@@ -170,5 +174,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
              created TEXT NOT NULL DEFAULT ''
          );",
     )?;
+    // Columns added after the first release. SQLite has no "ADD COLUMN IF NOT
+    // EXISTS", and re-adding one is the only error these can raise, so the
+    // result is discarded on purpose. Add to the list as the schema grows.
+    let added: &[&str] = &["ALTER TABLE mem_nodes ADD COLUMN swept TEXT NOT NULL DEFAULT ''"];
+    for stmt in added {
+        let _ = conn.execute(stmt, []);
+    }
     Ok(())
 }

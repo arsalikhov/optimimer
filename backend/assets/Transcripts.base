@@ -1,0 +1,43 @@
+# Transcripts — views over transcripts/ (what was actually said in the voice
+# recordings that were kept). kind: note | summary; `of` links to the tidied
+# version. Spoken commands are never filed here.
+filters:
+  and:
+    - 'type == "transcript"'
+properties:
+  title:
+    displayName: Transcript
+  kind:
+    displayName: Kept as
+  of:
+    displayName: Note / summary
+  source:
+    displayName: Recording
+  created:
+    displayName: Created
+views:
+  - type: table
+    name: Recent
+    limit: 10
+    order:
+      - title
+      - kind
+      - of
+      - source
+      - created
+    sort:
+      - property: created
+        direction: DESC
+  - type: table
+    name: All
+    groupBy:
+      property: kind
+      direction: ASC
+    order:
+      - title
+      - of
+      - source
+      - created
+    sort:
+      - property: created
+        direction: DESC

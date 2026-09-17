@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 mod agent;
 mod callbacks;
+mod edits;
 mod help;
 mod lists;
 mod machines;
@@ -47,6 +48,7 @@ mod workflows;
 
 use agent::*;
 use callbacks::*;
+use edits::*;
 use help::*;
 use lists::*;
 use machines::*;
@@ -80,6 +82,20 @@ struct BotState {
     /// One lock per chat: agent turns run off the polling loop (so a slow model
     /// can't freeze the bot) but stay in order within a chat.
     turns: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The voice recording being handled right now, kept only for the length of
+    /// that turn. If the turn ends up saving a note or a summary, the recording
+    /// is filed verbatim under `transcripts/`; a spoken command consumes
+    /// nothing and the slot is simply dropped. See `media::take_voice`.
+    voice: Arc<Mutex<HashMap<i64, VoiceTake>>>,
+}
+
+/// One transcribed recording waiting to be claimed by whatever the turn saves.
+#[derive(Clone)]
+struct VoiceTake {
+    /// The transcript exactly as it came back from the transcriber.
+    text: String,
+    /// e.g. "voice memo, 1m20s".
+    source: String,
 }
 
 impl BotState {
@@ -165,6 +181,7 @@ pub async fn run_bot(store: Store, db: Db) {
         db,
         allowed: Arc::new(allowed),
         turns: Arc::new(Mutex::new(HashMap::new())),
+        voice: Arc::new(Mutex::new(HashMap::new())),
     };
     let mut offset: i64 = 0;
 

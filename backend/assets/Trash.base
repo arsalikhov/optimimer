@@ -1,0 +1,40 @@
+# Trash — the bin. Memories the bot dropped, kept for TRASH_DAYS (30 by
+# default) before they go for good. `reason` says why it went; ask the bot to
+# restore one by name while it is still here.
+filters:
+  and:
+    - 'type == "trashed"'
+properties:
+  title:
+    displayName: Memory
+  kind:
+    displayName: Kind
+  reason:
+    displayName: Why it went
+  deleted:
+    displayName: Dropped
+  related:
+    displayName: Was linked to
+views:
+  - type: table
+    name: Recoverable
+    order:
+      - title
+      - kind
+      - reason
+      - deleted
+    sort:
+      - property: deleted
+        direction: DESC
+  - type: table
+    name: By reason
+    groupBy:
+      property: reason
+      direction: ASC
+    order:
+      - title
+      - kind
+      - deleted
+    sort:
+      - property: deleted
+        direction: DESC

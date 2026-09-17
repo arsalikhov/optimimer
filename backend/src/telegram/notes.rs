@@ -152,6 +152,18 @@ pub(super) async fn handle_note(state: &BotState, chat_id: i64, body: &str) -> R
     match vault::write_note(note) {
         Ok(doc) => {
             crate::memory::link_vault_doc("note", &doc);
+            // Spoken? Keep what was actually said next to the tidied note.
+            if let Some(v) = take_voice(state, chat_id) {
+                if let Err(e) = vault::write_transcript(vault::NewTranscript {
+                    title: doc.title(),
+                    kind: "note".into(),
+                    source: v.source,
+                    linked: doc.rel.clone(),
+                    text: v.text,
+                }) {
+                    tracing::warn!("vault transcript write failed: {e}");
+                }
+            }
             let tags = doc.get("tags").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(|t| t.as_str()).map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ")).unwrap_or_default();
             Reply::text(format!("Saved note *{}* [{}] ({}) {}\n📁 {}", md_escape(&title), doc.str("category"), doc.str("status"), md_escape(&tags), md_escape(&doc.rel)))
         }
@@ -180,7 +192,7 @@ pub(super) async fn handle_complete(_state: &BotState, _chat_id: i64, body: &str
     let picked = match candidates.len() {
         0 => return Reply::text(format!("Couldn't find an open task matching '{}'.", body.trim())),
         1 if !crate::jev::enabled() => Some(0),
-        _ => pick_candidate(body, &candidates).await,
+        _ => pick_task(body, &candidates).await,
     };
     let Some(idx) = picked else {
         let list = candidates.iter().take(10).enumerate().map(|(i, d)| format!("{}. {}", i + 1, md_escape(&d.title()))).collect::<Vec<_>>().join("\n");
@@ -200,9 +212,11 @@ pub(super) async fn handle_complete(_state: &BotState, _chat_id: i64, body: &str
 /// Jev must be at least this sure before a task is ticked on its word.
 const PICK_MIN_CONFIDENCE: f64 = 0.6;
 
-/// Which of the open tasks did the user mean? An index into `docs`, or `None`
-/// when none clearly matches — a wrong tick is worse than asking.
-async fn pick_candidate(query: &str, docs: &[Doc]) -> Option<usize> {
+/// Which of the open tasks did the user mean to tick? An index into `docs`, or
+/// `None` when none clearly matches — a wrong tick is worse than asking. Jev
+/// decides when it is configured; otherwise (or if it fails) the generic
+/// picker below does.
+async fn pick_task(query: &str, docs: &[Doc]) -> Option<usize> {
     if crate::jev::enabled() {
         let mut options: Vec<(String, String)> = docs.iter().take(crate::jev::MAX_OPTIONS - 1).enumerate().map(|(i, d)| (format!("task_{}", i + 1), d.title())).collect();
         options.push(("none_of_these".into(), "No listed task is the one the user says they finished".into()));
@@ -218,17 +232,24 @@ async fn pick_candidate(query: &str, docs: &[Doc]) -> Option<usize> {
         }
         // Jev failed: fall through to the LLM.
     }
+    pick_candidate(query, docs).await
+}
+
+/// Which of several docs — tasks, notes, summaries — did the user mean? An
+/// index into `docs`, or `None` when the answer is unreadable or says none of
+/// them is clearly it.
+pub(super) async fn pick_candidate(query: &str, docs: &[Doc]) -> Option<usize> {
     let list = docs
         .iter()
         .enumerate()
         .map(|(i, d)| format!("{}. {}", i + 1, d.title()))
         .collect::<Vec<_>>()
         .join("\n");
-    let system = "You pick which open task the user means to mark complete. Output ONLY minified JSON {\"index\":<1-based number>} — the single best match by title, or {\"index\":0} if none of them is clearly it. No prose, no code fences.";
-    let prompt = format!("User says they completed: \"{query}\"\n\nOPEN TASKS:\n{list}");
+    let system = "You pick which of the listed items the user is referring to. Output ONLY minified JSON {\"index\":<1-based number>} — the single best match by title, or {\"index\":0} if none of them is clearly it. No prose, no code fences.";
+    let prompt = format!("The user refers to: \"{query}\"\n\nITEMS:\n{list}");
     let raw = crate::openrouter::chat(&crate::llm::parser(), system, &prompt).await.unwrap_or_default();
     let trimmed = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-    // An unreadable answer or 0 means "don't know" — never silently the first task.
+    // An unreadable answer or 0 means "don't know" — never silently the first doc.
     serde_json::from_str::<Value>(trimmed)
         .ok()
         .and_then(|v| v["index"].as_u64())

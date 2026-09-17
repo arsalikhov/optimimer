@@ -34,6 +34,22 @@ pub(super) fn agent_tools() -> Value {
             "related_to": { "type": "string", "description": "Optional name of an existing entity this links to." },
             "relation": { "type": "string", "description": "Optional relation label, e.g. 'is the dentist of'." }
         }), &["kind", "name"])),
+        tool_def("edit_memory", "Correct something already in memory: replace its summary, rename it, or change what kind of thing it is. Use this when the user says a stored fact is wrong or out of date ('no, she moved to Lisbon'), rather than remembering a second, conflicting version. Call recall first if you're unsure of the exact stored name.", obj(json!({
+            "name": { "type": "string", "description": "The name it is currently stored under, as recall shows it." },
+            "summary": { "type": "string", "description": "The corrected summary — one factual sentence, third person. Omit to keep the current one." },
+            "new_name": { "type": "string", "description": "Only when the name itself was wrong or has changed." },
+            "kind": { "type": "string", "enum": ["person", "organization", "project", "place", "topic", "preference", "fact", "event"], "description": "Only when it was filed as the wrong kind." }
+        }), &["name"])),
+        tool_def("forget_memory", "Drop an entry from long-term memory entirely. For things that should never have been stored — a shopping-list item, a passing bit of state, something the user says isn't worth remembering. A fact that merely changed is edit_memory instead.", obj(json!({
+            "name": { "type": "string", "description": "The name it is stored under, as recall shows it." }
+        }), &["name"])),
+        tool_def("list_trash", "Show memories that were dropped but are still recoverable — by the sweep, by forget_memory, or by deleting their note in Obsidian (displayed directly).", obj(json!({}), &[])),
+        tool_def("restore_memory", "Put a dropped memory back, with whatever of its links still make sense. Use when the user says something was forgotten by mistake or wants it back.", obj(json!({
+            "name": { "type": "string", "description": "Its name as list_trash shows it." }
+        }), &["name"])),
+        tool_def("tidy_memory", "Run the memory sweep now instead of waiting for the weekly one: a strong model folds duplicate entries together and drops ones that are about using the bot rather than about the user (shopping-list items, modes, confirmations). Owner only. Only when the user asks (e.g. 'tidy up your memory', 'clean up what you know').", obj(json!({
+            "everything": { "type": "boolean", "description": "True to re-read the whole graph, not just entries learned since the last sweep — for clearing out old clutter. It works through a batch at a time and says how many are left." }
+        }), &[])),
         // ---- tasks & notes (vault) ----
         tool_def("create_task", &format!("Create a task, meeting or appointment as a note in the vault. Category is chosen automatically from: {cats}."), obj(json!({
             "text": { "type": "string", "description": "The task in natural language including any date/time and project, e.g. 'bike fit for the triathlon next tuesday 2pm'." }
@@ -44,11 +60,22 @@ pub(super) fn agent_tools() -> Value {
         tool_def("save_note", "Save a note, idea or reference text to the vault (auto-titled, categorised and tagged).", obj(json!({ "text": { "type": "string" } }), &["text"])),
         tool_def("list_notes", "Show the user their newest notes (displayed directly).", obj(json!({}), &[])),
         tool_def("search_notes", "Search notes by keywords (displayed directly).", obj(json!({ "query": { "type": "string" } }), &["query"])),
+        tool_def("read_note", "Show one saved note in full — title, tags and the whole body (displayed directly). Use it when the user asks what a note says, or to check a note before or after editing it.", obj(json!({
+            "query": { "type": "string", "description": "Words from the note's title or body." }
+        }), &["query"])),
+        tool_def("edit_note", "Change a note that is already saved: add to it, correct it, retitle it, re-tag it. The instruction is applied to the whole note and everything else is kept, so never paste the note back — just say what should change. Renaming a note renames its file too.", obj(json!({
+            "query": { "type": "string", "description": "Words identifying which note, e.g. 'the Lisbon packing list'." },
+            "instruction": { "type": "string", "description": "What to change, in plain language, e.g. 'add that the deposit is €200' or 'title it Bike fit and tag it cycling'." }
+        }), &["query", "instruction"])),
         tool_def("save_memo", "Turn a long spoken/typed thought-dump into a summarised memo note (title, key points, action items, transcript). Use when the user is thinking out loud rather than asking for something.", obj(json!({
             "text": { "type": "string", "description": "The full transcript/text to summarise." }
         }), &["text"])),
         tool_def("list_summaries", "Show saved conversation/voice-memo summaries (displayed directly).", obj(json!({}), &[])),
         tool_def("show_summary", "Show one saved summary by its number from the list (displayed directly).", obj(json!({ "number": { "type": "integer" } }), &["number"])),
+        tool_def("edit_summary", "Change a saved summary: reword or retitle it, add a key point the summariser missed, drop a wrong one, add or tick off an action item. The transcript is never changed. Use list_summaries first if you don't know the number.", obj(json!({
+            "number": { "type": "integer", "description": "Its number in list_summaries; 1 (the newest) if the user doesn't say." },
+            "instruction": { "type": "string", "description": "What to change, in plain language, e.g. 'the meeting is Thursday not Tuesday' or 'add an action item to send the invoice'." }
+        }), &["number", "instruction"])),
         // ---- reminders & email ----
         tool_def("set_reminder", "Schedule a Telegram ping at a future time.", obj(json!({
             "text": { "type": "string", "description": "What to be reminded of and when, e.g. 'pay rent tomorrow 9am'." }
@@ -171,6 +198,22 @@ pub(super) async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: 
             let _ = crate::vault::mirror_memory_node(&node, &m.neighbors(&node.id, 12));
             observe(format!("Remembered [{}] {}.", node.kind, node.name))
         }
+        "edit_memory" => observe(edit_memory_reply(&s("name"), &s("summary"), &s("new_name"), &s("kind")).text),
+        "forget_memory" => observe(forget_memory_reply(&s("name")).text),
+        "list_trash" => display(trash_reply()),
+        "restore_memory" => observe(restore_memory_reply(&s("name")).text),
+        "tidy_memory" => {
+            if !state.is_owner(chat_id) {
+                return observe("Only the owner can tidy up the memory.");
+            }
+            let all = args["everything"].as_bool().unwrap_or(false);
+            let report = if all { crate::sweep::run_all().await } else { crate::sweep::run().await };
+            observe(if report.changed() {
+                report.message()
+            } else {
+                format!("Nothing to tidy — looked at {} memory entries and they're all worth keeping.", report.considered)
+            })
+        }
         // ---- vault ----
         "create_task" => observe(handle_todo(state, chat_id, &s("text")).await.text),
         "complete_task" => observe(handle_complete(state, chat_id, &s("query")).await.text),
@@ -179,12 +222,18 @@ pub(super) async fn exec_tool(state: &BotState, chat_id: i64, name: &str, args: 
         "save_note" => observe(handle_note(state, chat_id, &s("text")).await.text),
         "list_notes" => display(list_docs_reply(crate::vault::NOTES)),
         "search_notes" => display(search_reply(crate::vault::NOTES, &s("query"))),
+        "read_note" => display(read_note_reply(&s("query")).await),
+        "edit_note" => display(edit_note_reply(&s("query"), &s("instruction")).await),
         "save_memo" => match memo_from_text(state, chat_id, &s("text")).await {
             Some(reply) => display(reply),
             None => observe("Couldn't summarise that."),
         },
         "list_summaries" => display(summaries_reply(state, chat_id)),
         "show_summary" => display(summary_reply(state, chat_id, &args["number"].to_string())),
+        "edit_summary" => {
+            let n = args["number"].as_u64().unwrap_or(1) as usize;
+            display(edit_summary_reply(state, chat_id, n, &s("instruction")).await)
+        }
         // ---- reminders & email (still workflow agents) ----
         "set_reminder" => observe(run_command(state, chat_id, "notify", &s("text"), "").await.text),
         "send_email" => observe(run_command(state, chat_id, "email", &s("text"), "").await.text),
@@ -334,6 +383,9 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
            Extract amounts, dates, names yourself; ask a question only when a required detail is genuinely missing.\n\
          - Before answering questions about people, plans, preferences or anything not visible in this conversation, call `recall`. \
            Use `remember` when the user tells you something worth keeping.\n\
+         - Correct, don't duplicate: when something already saved is wrong, stale or incomplete, edit it \
+           (`edit_note`, `edit_summary`, `edit_memory`) instead of saving a second, conflicting copy. Say what should \
+           change in plain language — the editing tools read the saved version themselves, so never paste it back.\n\
          - For anything current or outside your knowledge (news, prices, weather, hours, recent events), call `web_search`, \
            then `read_page` on the best hit if the snippets aren't enough; mention the source URL in your answer.\n\
          - You start on a fast, inexpensive model. For requests that need real reasoning — multi-step planning, tricky \
@@ -392,6 +444,9 @@ pub(super) async fn run_agent_routed(client: &reqwest::Client, api: &str, state:
     // What tools actually saved this turn — handed to the memory extractor so it
     // doesn't restate a task/note/expense as a "fact".
     let mut recorded: Vec<String> = Vec::new();
+    // Every tool this turn called, which decides whether the extractor runs at
+    // all — see `memory::worth_learning`.
+    let mut called: Vec<String> = Vec::new();
     // Start on the chat's route (everyday model unless the owner pinned one);
     // the model can still climb to `strong` and then `max` mid-turn.
     let stored_route = crate::llm::route(chat_id);
@@ -444,6 +499,7 @@ pub(super) async fn run_agent_routed(client: &reqwest::Client, api: &str, state:
                 continue;
             }
             let result = exec_tool(state, chat_id, &name, &cargs).await;
+            called.push(name.clone());
             if matches!(name.as_str(), "create_task" | "save_note" | "save_memo" | "log_expense" | "log_income" | "set_reminder" | "remember" | "complete_task") {
                 recorded.push(format!("{name}: {}", result.text.lines().next().unwrap_or("")));
             }
@@ -464,8 +520,13 @@ pub(super) async fn run_agent_routed(client: &reqwest::Client, api: &str, state:
     let stored = if final_text.is_empty() { if shown_any { "(showed the requested information)".to_string() } else { "Done.".to_string() } } else { final_text.clone() };
     let assistant_id = mem.add_message(chat_id, "assistant", &stored);
     let (u, a) = (user_text.to_string(), stored.clone());
+    // A turn that only ran commands has nothing to learn from — the graph is
+    // about the user's life, not about their use of the bot.
+    let learn = memory::worth_learning(&called);
     tokio::spawn(async move {
-        memory::extract(chat_id, &u, &a, &recorded, assistant_id).await;
+        if learn {
+            memory::extract(chat_id, &u, &a, &recorded, assistant_id).await;
+        }
         memory::maybe_roll_summary(chat_id).await;
     });
     let _ = user_id;
@@ -478,7 +539,7 @@ pub(super) async fn run_agent_routed(client: &reqwest::Client, api: &str, state:
     }
 }
 
-fn clip(s: &str, n: usize) -> String {
+pub(super) fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
 }
 

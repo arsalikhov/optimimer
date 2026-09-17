@@ -91,6 +91,29 @@ pub(super) fn fmt_duration(secs: u64) -> String {
     }
 }
 
+/// Hold a transcribed recording for the rest of this turn, so that whatever the
+/// turn saves can file the words verbatim under `transcripts/`.
+fn hold_voice(state: &BotState, chat_id: i64, text: &str, source: &str) {
+    if let Ok(mut slot) = state.voice.lock() {
+        slot.insert(chat_id, VoiceTake { text: text.to_string(), source: source.to_string() });
+    }
+}
+
+/// Claim the recording behind this turn, if there was one — called by the code
+/// that has just written a note or a summary. Taking it clears the slot, so one
+/// recording is filed once even when a turn saves several things.
+pub(super) fn take_voice(state: &BotState, chat_id: i64) -> Option<VoiceTake> {
+    state.voice.lock().ok()?.remove(&chat_id)
+}
+
+/// Drop an unclaimed recording at the end of a turn: a spoken command is not
+/// something to keep.
+fn drop_voice(state: &BotState, chat_id: i64) {
+    if let Ok(mut slot) = state.voice.lock() {
+        slot.remove(&chat_id);
+    }
+}
+
 /// Download a voice note and transcribe it, then decide between "memo" (summarize
 /// and save a note) and a conversation turn for the agent. Memo gates: a spoken
 /// opener ("memo …", "note to self …") or a recording at least `VOICE_MEMO_SECS`
@@ -109,6 +132,8 @@ pub(super) async fn handle_voice(
         Err(e) => return send(client, api, chat_id, &Reply::text(e)).await,
     };
     let source = format!("voice memo, {}", fmt_duration(duration_secs));
+    // Offered to every path below; only one that saves a note or summary keeps it.
+    hold_voice(state, chat_id, &transcript, &source);
 
     if let Some(body) = memo_by_keyword(&transcript) {
         return finalize_convo(client, api, state, chat_id, "voice", &source, &body, "").await;
@@ -127,6 +152,7 @@ pub(super) async fn handle_voice(
     if let Some(reply) = run_agent(client, api, state, chat_id, &transcript).await {
         send(client, api, chat_id, &reply).await;
     }
+    drop_voice(state, chat_id);
 }
 
 /// Download a Telegram file's bytes by file_id (getFile → download URL).

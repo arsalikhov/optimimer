@@ -8,14 +8,16 @@ backend/            Rust (axum + tokio + rusqlite) — the whole product
   src/config.rs       stored settings + paired chats (settings / chats tables)
   src/telegram/       the bot: mod.rs loop, agent.rs (tool-calling agent), onboarding.rs,
                       callbacks.rs, media.rs (voice/receipt/CSV), summaries.rs, notes.rs,
-                      money.rs, lists.rs, watch.rs, machines.rs, prefs.rs, workflows.rs
+                      edits.rs (editing saved notes/summaries/memories), money.rs, lists.rs,
+                      watch.rs, machines.rs, prefs.rs, workflows.rs
   src/memory.rs       conversation store + knowledge graph + recall
+  src/sweep.rs        weekly consolidation of duplicate memory entries
   src/vault.rs        Markdown files, Bases, starter files
   src/finance.rs      ledger, CSV import, dedup;  charts.rs renders Charts.md / Gantt.md
   src/jev.rs          optional Jev client: typed noul/choice/score decisions (telegram/triage.rs uses it per message)
   src/engine.rs       graph execution engine for the workflow agents
   agents/             bundled cmd-*.json parsers (todo, note, spent, earned, notify, email)
-  assets/             starter .base files and Home.md
+  assets/             starter .base files and Home.canvas
 frontend/           SvelteKit + @xyflow/svelte visual flow editor for the workflow agents (bun)
 deploy/             optimimer-setup (the interactive setup), deb/ (Debian packaging), obsidian-sync.service
                     template, bin/ prebuilt aarch64 binary for clone installs

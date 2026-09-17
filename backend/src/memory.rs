@@ -52,6 +52,13 @@ pub fn init(db: Db) -> Memory {
 /// category list is fixed (see `vault::categories`) and seeded at startup.
 pub const KINDS: &[&str] = &["person", "organization", "project", "place", "topic", "preference", "fact", "event"];
 
+/// A graph over `db` that isn't the process-wide one — tests only, so each one
+/// gets a clean database instead of racing over `GLOBAL`.
+#[cfg(test)]
+pub fn scoped(db: Db) -> Memory {
+    Memory { db }
+}
+
 pub fn global() -> Memory {
     GLOBAL
         .get_or_init(|| Memory { db: Db::memory().expect("in-memory memory db") })
@@ -94,6 +101,18 @@ fn row_node(r: &rusqlite::Row) -> rusqlite::Result<Node> {
 }
 
 const NODE_COLS: &str = "id, kind, name, summary, path, mentions, updated";
+
+/// Outcome of `Memory::edit_node`.
+// `Updated` carries two whole nodes and the other variants carry almost
+// nothing; one of these is built per edit, so the size gap costs nothing.
+#[allow(clippy::large_enum_variant)]
+pub enum Edit {
+    /// Nothing in the graph goes by that name.
+    Missing,
+    /// The new name is already taken by a different node (holds that node's name).
+    Conflict(String),
+    Updated { before: Node, after: Node },
+}
 
 impl Memory {
     // ---- conversation ------------------------------------------------------
@@ -233,6 +252,56 @@ impl Memory {
         self.get(&id).unwrap_or(Node { id, kind: kind.into(), name: name.into(), summary: summary.into(), path: path.into(), mentions: 1, updated: now })
     }
 
+    /// Repoint the graph at a vault file that moved: a note or task whose title
+    /// (and therefore file name) was edited. No-op when nothing referred to it.
+    pub fn repoint(&self, old_rel: &str, new_rel: &str, new_title: &str) {
+        if old_rel.is_empty() || old_rel == new_rel {
+            return;
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.db.lock();
+        let _ = conn.execute(
+            "UPDATE mem_nodes SET path = ?2, name = ?3, norm = ?4, updated = ?5 WHERE path = ?1",
+            params![old_rel, new_rel, new_title, norm(new_title), now],
+        );
+    }
+
+    /// Edit a node that already exists: rename it, replace its summary, or move
+    /// it to another kind. Blank arguments leave that field alone.
+    pub fn edit_node(&self, name: &str, new_name: &str, summary: &str, kind: &str) -> Edit {
+        let Some(before) = self.by_name(name) else {
+            return Edit::Missing;
+        };
+        let new_name = new_name.trim();
+        let summary = summary.trim();
+        // Only the extractor's kinds; `category` is seeded, not edited.
+        let kind = { let k = norm(kind); if KINDS.contains(&k.as_str()) { k } else { String::new() } };
+        if !new_name.is_empty() && !new_name.eq_ignore_ascii_case(&before.name) {
+            if let Some(other) = self.by_name(new_name) {
+                if other.id != before.id {
+                    return Edit::Conflict(other.name);
+                }
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = self.db.lock();
+            let _ = conn.execute(
+                "UPDATE mem_nodes SET
+                   name = CASE WHEN ?2 != '' THEN ?2 ELSE name END,
+                   norm = CASE WHEN ?3 != '' THEN ?3 ELSE norm END,
+                   summary = CASE WHEN ?4 != '' THEN ?4 ELSE summary END,
+                   kind = CASE WHEN ?5 != '' THEN ?5 ELSE kind END,
+                   updated = ?6 WHERE id = ?1",
+                params![before.id, new_name, norm(new_name), summary, kind, now],
+            );
+        }
+        match self.get(&before.id) {
+            Some(after) => Edit::Updated { before, after },
+            None => Edit::Missing,
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<Node> {
         let conn = self.db.lock();
         conn.query_row(&format!("SELECT {NODE_COLS} FROM mem_nodes WHERE id = ?1"), params![id], row_node).optional().ok().flatten()
@@ -251,6 +320,31 @@ impl Memory {
     }
 
     /// Both directions: (relation as seen from `id`, neighbour).
+    /// The ids currently linked to `id`. Capture these *before* removing or
+    /// renaming a node: afterwards the edges are gone and there is no way to
+    /// tell whose mirror needs rewriting.
+    pub fn neighbor_ids(&self, id: &str) -> Vec<String> {
+        self.neighbors(id, 50).into_iter().map(|(_, n)| n.id).collect()
+    }
+
+    /// Rewrite the vault mirrors of these nodes, skipping any that are gone.
+    /// Call it with the `neighbor_ids` captured before a node was deleted,
+    /// merged away or renamed: their "Related" lists still name the old file,
+    /// and Obsidian draws a wikilink to a missing file as a node in the graph —
+    /// so a dead link looks exactly like the memory is still there.
+    pub fn remirror(&self, ids: &[String]) -> usize {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut n = 0;
+        for id in ids.iter().filter(|id| seen.insert(id.as_str())) {
+            if let Some(node) = self.get(id) {
+                if crate::vault::mirror_memory_node(&node, &self.neighbors(id, 12)).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     pub fn neighbors(&self, id: &str, limit: usize) -> Vec<(String, Node)> {
         let conn = self.db.lock();
         let sql = format!(
@@ -304,11 +398,103 @@ impl Memory {
         hits
     }
 
+    /// Nodes that own a mirror note of their own: everything except categories
+    /// (seeded, not learned) and the task/note entries, which point at their
+    /// own vault file instead of getting a duplicate.
+    pub fn mirrored_nodes(&self) -> Vec<Node> {
+        self.all_nodes().into_iter().filter(|n| n.path.is_empty() && n.kind != "category").collect()
+    }
+
     pub fn all_nodes(&self) -> Vec<Node> {
         let conn = self.db.lock();
         conn.prepare(&format!("SELECT {NODE_COLS} FROM mem_nodes ORDER BY updated DESC"))
             .and_then(|mut st| st.query_map([], row_node).map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>()))
             .unwrap_or_default()
+    }
+
+    // ---- weekly sweep (see `crate::sweep`) --------------------------------
+
+    /// Nodes the sweep has never looked at, oldest first. Categories are seeded,
+    /// not learned, so they are never up for consolidation.
+    pub fn unswept(&self, limit: usize) -> Vec<Node> {
+        let conn = self.db.lock();
+        conn.prepare(&format!("SELECT {NODE_COLS} FROM mem_nodes WHERE swept = '' AND kind != 'category' ORDER BY updated ASC LIMIT ?1"))
+            .and_then(|mut st| st.query_map(params![limit as i64], row_node).map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>()))
+            .unwrap_or_default()
+    }
+
+    /// How many nodes the sweep has yet to look at.
+    pub fn unswept_count(&self) -> i64 {
+        let conn = self.db.lock();
+        conn.query_row("SELECT COUNT(*) FROM mem_nodes WHERE swept = '' AND kind != 'category'", [], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// Clear every sweep stamp so the next runs walk the whole graph again, a
+    /// batch at a time. Backs the one-off "tidy up everything" pass — the
+    /// weekly run stays incremental, and the batch cap still bounds each call.
+    pub fn reset_swept(&self) -> usize {
+        let conn = self.db.lock();
+        conn.execute("UPDATE mem_nodes SET swept = '' WHERE swept != ''", []).unwrap_or(0)
+    }
+
+    /// Record that the sweep has considered these nodes, so the next run starts
+    /// from whatever has been learned since.
+    pub fn mark_swept(&self, ids: &[String]) {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.db.lock();
+        for id in ids {
+            let _ = conn.execute("UPDATE mem_nodes SET swept = ?2 WHERE id = ?1", params![id, now]);
+        }
+    }
+
+    /// Overwrite a node's fields by id. Unlike `edit_node` this takes no view on
+    /// what is sensible — the sweep has already decided.
+    pub fn set_node(&self, id: &str, name: &str, kind: &str, summary: &str) {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.db.lock();
+        let _ = conn.execute(
+            "UPDATE mem_nodes SET
+               name = CASE WHEN ?2 != '' THEN ?2 ELSE name END,
+               norm = CASE WHEN ?3 != '' THEN ?3 ELSE norm END,
+               kind = CASE WHEN ?4 != '' THEN ?4 ELSE kind END,
+               summary = CASE WHEN ?5 != '' THEN ?5 ELSE summary END,
+               updated = ?6 WHERE id = ?1",
+            params![id, name.trim(), norm(name), norm(kind), summary.trim(), now],
+        );
+    }
+
+    /// Fold `absorb` into `keep`: every edge is repointed at the survivor, the
+    /// mention counts add up, and the absorbed rows go. Edges that would become
+    /// self-loops or collide with one `keep` already has are dropped, since
+    /// `mem_edges` is unique on (src, dst, rel). Returns how many nodes went.
+    pub fn merge_nodes(&self, keep: &str, absorb: &[String]) -> usize {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.db.lock();
+        let mut gone = 0;
+        for id in absorb.iter().filter(|id| id.as_str() != keep) {
+            let Some(mentions) = conn
+                .query_row("SELECT mentions FROM mem_nodes WHERE id = ?1", params![id], |r| r.get::<_, i64>(0))
+                .optional()
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let _ = conn.execute("UPDATE OR IGNORE mem_edges SET src = ?2 WHERE src = ?1", params![id, keep]);
+            let _ = conn.execute("UPDATE OR IGNORE mem_edges SET dst = ?2 WHERE dst = ?1", params![id, keep]);
+            let _ = conn.execute("DELETE FROM mem_edges WHERE src = ?1 OR dst = ?1 OR src = dst", params![id]);
+            let _ = conn.execute("DELETE FROM mem_nodes WHERE id = ?1", params![id]);
+            let _ = conn.execute("UPDATE mem_nodes SET mentions = mentions + ?2, updated = ?3 WHERE id = ?1", params![keep, mentions, now]);
+            gone += 1;
+        }
+        gone
+    }
+
+    /// Drop a node and everything hanging off it.
+    pub fn delete_node(&self, id: &str) -> bool {
+        let conn = self.db.lock();
+        let _ = conn.execute("DELETE FROM mem_edges WHERE src = ?1 OR dst = ?1", params![id]);
+        conn.execute("DELETE FROM mem_nodes WHERE id = ?1", params![id]).unwrap_or(0) > 0
     }
 
     pub fn node_count(&self) -> i64 {
@@ -430,6 +616,19 @@ fn parse_json_loose(text: &str) -> Value {
 /// them into the graph. `recorded` lists what the assistant already saved this
 /// turn (tasks, notes, expenses…) so the extractor doesn't restate them as
 /// facts. Runs after the reply was sent; failures only log.
+/// Tools whose turns are worth a pass by the extractor. Everything else the
+/// agent can do is a **command** — ticking a shopping list, logging an expense,
+/// waking a machine, flipping a setting — and the graph is not a log of those:
+/// "Buy shampoo" and "shopping mode enabled" are not things to remember about
+/// someone's life. A turn that called no tool at all is plain conversation,
+/// which is where "my dentist is Alex" actually shows up, so that is read too.
+pub const WORTH_LEARNING: &[&str] = &["save_note", "save_memo", "create_task", "complete_task", "edit_note", "edit_summary"];
+
+/// Whether the extractor should even look at a turn, given the tools it called.
+pub fn worth_learning(called: &[String]) -> bool {
+    called.is_empty() || called.iter().any(|n| WORTH_LEARNING.contains(&n.as_str()))
+}
+
 pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, recorded: &[String], evidence_id: i64) {
     let categories = crate::vault::categories().iter().map(|(n, _)| n.clone()).collect::<Vec<_>>().join(", ");
     let system = format!(
@@ -441,6 +640,9 @@ pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, record
          FIXED CATEGORIES already exist and must never be emitted as entities: {categories}. Refer to them by name in relations only (e.g. project X \"belongs to\" Work). \
          A project is narrower than a category (\"Website redesign\" is a project under the Work category; \"Work\" itself is not a project). \
          Do NOT emit facts or events that merely restate something the assistant already recorded this turn (listed under RECORDED): the task/note/expense file is the record. \
+         NEVER store the mechanics of using the assistant: items on a shopping list or the list itself (\"Buy shampoo\"), the assistant's own modes, \
+         settings or state (\"shopping mode enabled\", \"shopping mode triggers the grocery checklist\"), confirmations of what it just did, single \
+         purchases, or anything only useful for the next few minutes. Ask of each entity: would this still matter in a year? If not, drop it. \
          Skip greetings, transient chatter, and anything the assistant merely displayed (balances, lists). If nothing is worth keeping, output {{\"entities\":[],\"relations\":[]}}.",
         KINDS.join("|")
     );
@@ -647,6 +849,57 @@ mod tests {
         assert_eq!(hits[0].name, "Sam");
         assert!(m.search("triath race", 5).iter().any(|n| n.name == "Triathlon"), "prefix + OR fallback");
         assert!(m.search("zzz", 5).is_empty());
+    }
+
+    #[test]
+    fn commands_are_not_learned_from() {
+        let t = |v: &[&str]| worth_learning(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(t(&[]), "plain conversation is where facts turn up");
+        assert!(t(&["save_note"]));
+        assert!(t(&["create_task"]));
+        assert!(t(&["edit_summary"]));
+        assert!(!t(&["add_shopping_item"]), "a shopping list is not a memory");
+        assert!(!t(&["show_shopping_list", "clear_shopping_list"]));
+        assert!(!t(&["log_expense"]));
+        assert!(!t(&["get_balance", "list_transactions"]));
+        assert!(!t(&["wake_machine", "set_timezone", "web_search"]));
+        // One worthwhile tool among commands still earns a pass.
+        assert!(t(&["add_shopping_item", "save_note"]));
+    }
+
+    #[test]
+    fn editing_a_node_corrects_renames_and_refuses_collisions() {
+        let m = fresh();
+        let sam = m.upsert_node("person", "Sam", "Sam lives in Berlin", "");
+        m.upsert_node("person", "Alex", "", "");
+
+        // A blank field leaves that one alone.
+        let Edit::Updated { after, .. } = m.edit_node("sam", "", "Sam lives in Lisbon", "") else {
+            panic!("expected an update");
+        };
+        assert_eq!(after.id, sam.id, "edits keep the id, so edges still point at it");
+        assert_eq!(after.name, "Sam");
+        assert_eq!(after.summary, "Sam lives in Lisbon");
+        assert_eq!(after.kind, "person");
+
+        // Renaming moves the lookup with it.
+        let Edit::Updated { before, after } = m.edit_node("Sam", "Sam Rivera", "", "organization") else {
+            panic!("expected an update");
+        };
+        assert_eq!(before.name, "Sam");
+        assert_eq!(after.name, "Sam Rivera");
+        assert_eq!(after.kind, "organization");
+        assert_eq!(after.summary, "Sam lives in Lisbon", "a blank summary is not a wipe");
+        assert!(m.by_name("Sam").is_none());
+        assert_eq!(m.by_name("sam rivera").unwrap().id, sam.id);
+
+        assert!(matches!(m.edit_node("Sam Rivera", "Alex", "", ""), Edit::Conflict(n) if n == "Alex"));
+        assert!(matches!(m.edit_node("nobody", "", "x", ""), Edit::Missing));
+        // `category` is seeded, never something an edit can conjure.
+        let Edit::Updated { after, .. } = m.edit_node("Sam Rivera", "", "", "category") else {
+            panic!("expected an update");
+        };
+        assert_eq!(after.kind, "organization");
     }
 
     #[test]

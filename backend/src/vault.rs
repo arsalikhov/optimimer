@@ -10,7 +10,7 @@
 //!   tasks/<date>-<slug>.md       type: task     — `/todo`, `/complete`
 //!   summaries/<date>-<slug>.md   type: summary  — forwarded chats, voice memos
 //!   finance/<date>-<slug>-<id>.md type: transaction — mirror of the SQLite ledger (read-only)
-//!   *.base + Home.md              Bases views per folder and a dashboard (written once if missing)
+//!   *.base + Home.canvas          Bases views per folder and a dashboard canvas (written once if missing)
 //!
 //! Only a small YAML subset is written and read (scalars, quoted strings, inline
 //! lists), which is all Obsidian's property editor produces.
@@ -24,11 +24,18 @@ use std::path::{Path, PathBuf};
 pub const NOTES: &str = "notes";
 pub const TASKS: &str = "tasks";
 pub const SUMMARIES: &str = "summaries";
+/// Verbatim transcripts of voice recordings that became a note or a summary.
+/// Spoken *commands* ("add milk to the list") never land here — only what was
+/// kept. The note or summary is the tidied version; this is the recording.
+pub const TRANSCRIPTS: &str = "transcripts";
 /// Ledger mirror: one small note per transaction so Obsidian Bases can chart them.
 pub const FINANCE: &str = "finance";
 /// Knowledge-graph mirror: one flat note per memory node (people, projects, categories, facts…),
 /// wikilinked to its neighbours and to the task/note files it relates to.
 pub const MEMORY: &str = "memory";
+/// The bin. Memories the bot drops land here for `TRASH_DAYS` before going for
+/// good, so a bad merge or an over-eager sweep can be undone.
+pub const TRASH: &str = "trash";
 
 /// Root of the vault. `VAULT_DIR` may be absolute (`/opt/optimimer/vault`) or
 /// relative to the working directory.
@@ -39,7 +46,7 @@ pub fn dir() -> PathBuf {
 /// Create the vault folders. Call once at startup; harmless if they exist.
 pub fn init() -> Result<PathBuf> {
     let root = dir();
-    for sub in [NOTES, TASKS, SUMMARIES, FINANCE, MEMORY] {
+    for sub in [NOTES, TASKS, SUMMARIES, TRANSCRIPTS, FINANCE, MEMORY, TRASH] {
         fs::create_dir_all(root.join(sub))?;
     }
     Ok(root)
@@ -275,15 +282,64 @@ pub fn filename(title: &str) -> String {
 /// `<sub>/<Title>.md`, suffixed " 2", " 3"… if taken. The date lives in
 /// frontmatter (`created`), not the name.
 fn fresh_path(sub: &str, title: &str, _date: &str) -> PathBuf {
+    fresh_path_except(sub, title, Path::new(""))
+}
+
+/// Like `fresh_path`, but `keep` — the file being renamed — doesn't count as
+/// taken, so re-titling "Bike fit" to "Bike Fit" keeps its own name.
+fn fresh_path_except(sub: &str, title: &str, keep: &Path) -> PathBuf {
     let base = filename(title);
     let d = dir().join(sub);
     let mut p = d.join(format!("{base}.md"));
     let mut n = 2;
-    while p.exists() {
+    while p.exists() && p != keep {
         p = d.join(format!("{base} {n}.md"));
         n += 1;
     }
     p
+}
+
+// ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+
+/// The vault subfolder a doc lives in (`notes`, `tasks`, `summaries`…).
+fn sub_of(doc: &Doc) -> String {
+    doc.rel.split('/').next().unwrap_or(NOTES).to_string()
+}
+
+/// Rewrite a doc that already exists. A new `title` renames the file to match
+/// (vault files are named after their title, see `filename`), `body` replaces
+/// everything below the frontmatter, and `props` sets or adds frontmatter keys.
+/// `updated` is stamped either way. Returns the doc as it now reads from disk.
+///
+/// The caller is responsible for repointing anything that referred to the old
+/// path — `crate::memory::Memory::repath` for the knowledge graph.
+pub fn edit_doc(doc: &mut Doc, title: Option<String>, body: Option<String>, props: Vec<(String, Value)>) -> Result<Doc> {
+    if let Some(t) = title {
+        let t = t.trim().to_string();
+        if !t.is_empty() && t != doc.title() {
+            let sub = sub_of(doc);
+            let new_path = fresh_path_except(&sub, &t, &doc.path);
+            if new_path != doc.path {
+                if doc.path.exists() {
+                    fs::rename(&doc.path, &new_path)?;
+                }
+                doc.rel = new_path.strip_prefix(dir()).unwrap_or(&new_path).with_extension("").to_string_lossy().replace('\\', "/");
+                doc.path = new_path;
+            }
+            doc.set("title", Value::String(t));
+        }
+    }
+    if let Some(b) = body {
+        doc.body = b;
+    }
+    for (k, v) in props {
+        doc.set(&k, v);
+    }
+    doc.set("updated", Value::String(Utc::now().to_rfc3339()));
+    save(doc)?;
+    Ok(read(&doc.path).unwrap_or_else(|| doc.clone()))
 }
 
 /// All docs under a subfolder, newest first.
@@ -521,12 +577,25 @@ pub struct NewSummary {
 pub fn write_summary(s: NewSummary) -> Result<Doc> {
     let now = Utc::now().to_rfc3339();
     let mut doc = Doc { path: fresh_path(SUMMARIES, &s.title, &now), ..Default::default() };
-    doc.set("title", Value::String(s.title));
+    doc.set("title", Value::String(s.title.clone()));
     doc.set("type", Value::String("summary".into()));
-    doc.set("kind", Value::String(s.kind));
-    doc.set("source", Value::String(s.source));
+    doc.set("kind", Value::String(s.kind.clone()));
+    doc.set("source", Value::String(s.source.clone()));
     doc.set("tags", Value::Array(vec![Value::String("summary".into())]));
     doc.set("created", Value::String(now));
+    doc.body = summary_body(&s);
+    save(&doc)?;
+    Ok(read(&doc.path).unwrap_or(doc))
+}
+
+/// Re-render an existing summary file after its title, key points or action
+/// items were edited. The transcript is rebuilt from `s.transcript` — editing
+/// never rewrites what was actually said.
+pub fn update_summary(doc: &mut Doc, s: &NewSummary) -> Result<Doc> {
+    edit_doc(doc, Some(s.title.clone()), Some(summary_body(s)), vec![])
+}
+
+fn summary_body(s: &NewSummary) -> String {
     let mut body = String::new();
     if !s.note.trim().is_empty() {
         body.push_str(&format!("> {}\n\n", s.note.trim()));
@@ -548,9 +617,66 @@ pub fn write_summary(s: NewSummary) -> Result<Doc> {
             body.push_str("  \n");
         }
     }
+    body
+}
+
+// ---------------------------------------------------------------------------
+// Transcripts
+// ---------------------------------------------------------------------------
+
+pub struct NewTranscript {
+    /// The title of the note or summary this recording became.
+    pub title: String,
+    /// note | summary
+    pub kind: String,
+    /// Where the recording came from, e.g. "voice memo, 1m20s".
+    pub source: String,
+    /// Vault path (no `.md`) of that note or summary. May be empty if the file
+    /// write failed, in which case the transcript stands on its own.
+    pub linked: String,
+    /// What was actually said, unedited.
+    pub text: String,
+}
+
+/// File the verbatim text of a voice recording that was kept as a note or a
+/// summary, and wikilink the two together so either one opens the other in
+/// Obsidian. Called only once the note/summary itself is on disk.
+pub fn write_transcript(t: NewTranscript) -> Result<Doc> {
+    let now = Utc::now().to_rfc3339();
+    let mut doc = Doc { path: fresh_path(TRANSCRIPTS, &t.title, &now), ..Default::default() };
+    doc.set("title", Value::String(t.title.clone()));
+    doc.set("type", Value::String("transcript".into()));
+    doc.set("kind", Value::String(t.kind));
+    doc.set("source", Value::String(t.source));
+    doc.set("tags", Value::Array(vec![Value::String("transcript".into())]));
+    if !t.linked.is_empty() {
+        doc.set("of", Value::String(format!("[[{}|{}]]", t.linked, t.title)));
+    }
+    doc.set("created", Value::String(now));
+    let mut body = String::new();
+    if !t.linked.is_empty() {
+        body.push_str(&format!("Recording behind [[{}|{}]].\n\n", t.linked, t.title));
+    }
+    for line in t.text.lines() {
+        if !line.trim().is_empty() {
+            body.push_str(line.trim());
+            body.push_str("  \n");
+        }
+    }
     doc.body = body;
     save(&doc)?;
-    Ok(read(&doc.path).unwrap_or(doc))
+    let written = read(&doc.path).unwrap_or(doc);
+    // Backlink, so the note or summary says where the words came from.
+    if !t.linked.is_empty() {
+        let p = dir().join(format!("{}.md", t.linked));
+        if let Some(mut d) = read(&p) {
+            d.set("transcript", Value::String(format!("[[{}]]", written.rel)));
+            if let Err(e) = save(&d) {
+                tracing::warn!("couldn't backlink transcript into {}: {e}", t.linked);
+            }
+        }
+    }
+    Ok(written)
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +749,7 @@ pub fn backfill_transactions(txns: &[crate::finance::Txn]) -> usize {
 }
 
 /// Starter files dropped into the vault root if absent: one `.base` per
-/// folder plus a `Home.md` dashboard that embeds a view from each. Never
+/// folder plus a `Home.canvas` dashboard that embeds a view from each. Never
 /// overwritten — the user is expected to customise them. Returns the names
 /// written this time.
 pub fn ensure_starter_files() -> Result<Vec<&'static str>> {
@@ -632,8 +758,10 @@ pub fn ensure_starter_files() -> Result<Vec<&'static str>> {
         ("Tasks.base", include_str!("../assets/Tasks.base")),
         ("Notes.base", include_str!("../assets/Notes.base")),
         ("Summaries.base", include_str!("../assets/Summaries.base")),
+        ("Transcripts.base", include_str!("../assets/Transcripts.base")),
+        ("Trash.base", include_str!("../assets/Trash.base")),
         ("Memory.base", include_str!("../assets/Memory.base")),
-        ("Home.md", include_str!("../assets/Home.md")),
+        ("Home.canvas", include_str!("../assets/Home.canvas")),
     ];
     let mut written = Vec::new();
     for (name, body) in FILES {
@@ -690,6 +818,148 @@ pub fn mirror_memory_node(node: &crate::memory::Node, neighbors: &[(String, crat
     doc.body = body;
     save(&doc)?;
     Ok(doc)
+}
+
+/// Drop the mirror note a memory node used to have. Called when a node is
+/// renamed, so the vault doesn't keep a stale copy under the old name.
+pub fn remove_memory_mirror(name: &str) -> Result<()> {
+    let p = dir().join(MEMORY).join(format!("{}.md", filename(name)));
+    if p.exists() {
+        fs::remove_file(p)?;
+    }
+    Ok(())
+}
+
+/// Delete memory mirrors that no longer have a node behind them — what a merged
+/// or dropped entry leaves on disk. The graph is the source of truth here, and
+/// a leftover file keeps showing up in Obsidian's graph view as if the memory
+/// were still there.
+///
+/// `live` is every node that owns a mirror. Only files this code wrote are
+/// touched (`type: memory` in the frontmatter), so anything you put in
+/// `memory/` by hand is safe. Returns how many went.
+pub fn prune_memory_mirrors(live: &[String]) -> usize {
+    let keep: std::collections::HashSet<String> = live.iter().map(|n| filename(n)).collect();
+    let Ok(entries) = fs::read_dir(dir().join(MEMORY)) else { return 0 };
+    let mut gone = 0;
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        if keep.contains(&stem) {
+            continue;
+        }
+        if read(&path).map(|d| d.str("type") == "memory").unwrap_or(false) && fs::remove_file(&path).is_ok() {
+            tracing::info!("pruned orphan memory mirror {stem}");
+            gone += 1;
+        }
+    }
+    gone
+}
+
+// ---------------------------------------------------------------------------
+// The bin
+// ---------------------------------------------------------------------------
+
+/// How long a dropped memory stays recoverable.
+pub fn trash_days() -> i64 {
+    std::env::var("TRASH_DAYS").ok().and_then(|s| s.parse().ok()).filter(|d| *d > 0).unwrap_or(30)
+}
+
+/// Put a memory in the bin instead of dropping it on the floor: its note moves
+/// to `trash/` stamped with the date and the reason, and stays there until
+/// `purge_trash` clears it out. `restore_memory` reads it back.
+///
+/// Links are written as plain text, never wikilinks — a note in the bin must
+/// not draw edges in the graph view, which is the whole problem it exists to
+/// clean up.
+pub fn trash_memory(node: &crate::memory::Node, neighbors: &[(String, crate::memory::Node)], reason: &str) -> Result<Doc> {
+    let now = Utc::now().to_rfc3339();
+    let mut doc = Doc { path: fresh_path(TRASH, &node.name, &now), ..Default::default() };
+    doc.set("title", Value::String(node.name.clone()));
+    doc.set("type", Value::String("trashed".into()));
+    doc.set("was", Value::String("memory".into()));
+    doc.set("kind", Value::String(node.kind.clone()));
+    doc.set("reason", Value::String(reason.to_string()));
+    doc.set("mentions", Value::from(node.mentions));
+    doc.set("deleted", Value::String(now));
+    // "<relation> :: <name>", so a restore can rebuild the edges that survive.
+    doc.set(
+        "related",
+        Value::Array(neighbors.iter().map(|(r, n)| Value::String(format!("{} :: {}", r.trim_start_matches('←').trim(), n.name))).collect()),
+    );
+    let mut body = String::new();
+    if !node.summary.is_empty() {
+        body.push_str(&node.summary);
+        body.push('\n');
+    }
+    body.push_str(&format!("\nDropped on {} — {reason}. Ask to restore it, or it goes for good after {} days.\n", local_iso(&doc.str("deleted")), trash_days()));
+    doc.body = body;
+    save(&doc)?;
+    let _ = remove_memory_mirror(&node.name);
+    Ok(read(&doc.path).unwrap_or(doc))
+}
+
+/// Everything in the bin, newest first.
+pub fn trash() -> Vec<Doc> {
+    list(TRASH)
+}
+
+/// The binned memory filed under this name, if it is still there.
+pub fn trashed(name: &str) -> Option<Doc> {
+    trash().into_iter().find(|d| d.title().eq_ignore_ascii_case(name.trim()))
+}
+
+/// Take one out of the bin — the caller puts the node back in the graph first.
+pub fn untrash(doc: &Doc) {
+    if let Err(e) = fs::remove_file(&doc.path) {
+        tracing::warn!("couldn't clear {} from the bin: {e}", doc.rel);
+    }
+}
+
+/// The relations a binned memory had, as `(relation, other name)` pairs.
+pub fn trashed_relations(doc: &Doc) -> Vec<(String, String)> {
+    doc.get("related")
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(|s| s.split_once("::").map(|(r, n)| (r.trim().to_string(), n.trim().to_string())))
+                .filter(|(r, n)| !r.is_empty() && !n.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Empty out whatever has been in the bin longer than `TRASH_DAYS`. Returns how
+/// many went for good.
+pub fn purge_trash() -> usize {
+    let cutoff = Utc::now() - chrono::Duration::days(trash_days());
+    let mut gone = 0;
+    for doc in trash() {
+        let stamp = doc.str("deleted");
+        let old = chrono::DateTime::parse_from_rfc3339(&stamp).map(|t| t.with_timezone(&Utc) < cutoff).unwrap_or(false);
+        if old && fs::remove_file(&doc.path).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
+}
+
+/// The file names (without `.md`) of the memory mirrors on disk — what the
+/// graph is reconciled against, since a note you deleted in Obsidian is a
+/// memory you wanted gone.
+pub fn memory_mirror_names() -> std::collections::HashSet<String> {
+    fs::read_dir(dir().join(MEMORY))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How many memory notes exist on disk (to decide whether to re-mirror at start).
@@ -780,23 +1050,25 @@ pub fn err_hint(e: &anyhow::Error) -> String {
     format!("{e} (VAULT_DIR = {})", describe())
 }
 
+/// A throwaway vault for tests, anywhere in the crate. `VAULT_DIR` is process
+/// -wide, so the returned guard serialises every test that wants one.
+#[cfg(test)]
+pub fn test_vault() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // Under target/ (gitignored) rather than the system temp dir, which some
+    // sandboxes point at the working directory.
+    let p = std::env::current_dir().unwrap().join("target").join("test-vaults").join(uuid::Uuid::new_v4().to_string());
+    std::env::set_var("VAULT_DIR", &p);
+    init().unwrap();
+    (g, p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Tests share the process env, so serialise the ones that set VAULT_DIR.
-    static ENV: Mutex<()> = Mutex::new(());
-
-    fn temp_vault() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
-        let g = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        // Under target/ (gitignored) rather than the system temp dir, which some
-        // sandboxes point at the working directory.
-        let p = std::env::current_dir().unwrap().join("target").join("test-vaults").join(uuid::Uuid::new_v4().to_string());
-        std::env::set_var("VAULT_DIR", &p);
-        init().unwrap();
-        (g, p)
-    }
+    use test_vault as temp_vault;
 
     #[test]
     fn frontmatter_round_trips() {
@@ -868,6 +1140,52 @@ mod tests {
         assert_eq!(hits[0].title(), "VPN setup");
         assert_eq!(hits[0].get("tags").unwrap()[0], Value::String("home-lab".into()));
         assert_eq!(list(NOTES).len(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editing_a_note_renames_its_file_and_keeps_the_rest() {
+        let (_g, root) = temp_vault();
+        let mut d = write_note(NewNote { title: "VPN setup".into(), category: "Learning".into(), tags: vec!["home-lab".into()], status: "inbox".into(), body: "wireguard on the pi".into(), source: "telegram".into() }).unwrap();
+        let old = d.path.clone();
+        let after = edit_doc(
+            &mut d,
+            Some("Wireguard on the Pi".into()),
+            Some("wireguard on the pi\nport 51820".into()),
+            vec![("status".into(), Value::String("final".into()))],
+        )
+        .unwrap();
+        assert!(!old.exists(), "the old file is gone, not left as a duplicate");
+        assert!(after.rel.ends_with("notes/Wireguard on the Pi"), "{}", after.rel);
+        assert_eq!(after.str("title"), "Wireguard on the Pi");
+        assert_eq!(after.str("status"), "final");
+        assert_eq!(after.str("category"), "Learning", "untouched props survive");
+        assert!(!after.str("updated").is_empty());
+        assert!(after.body.contains("port 51820"));
+        assert_eq!(list(NOTES).len(), 1);
+        // Re-titling to the name it already has must not push it to " 2".
+        let again = edit_doc(&mut d, Some("Wireguard on the Pi".into()), None, vec![]).unwrap();
+        assert_eq!(again.rel, after.rel);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_transcript_links_both_ways() {
+        let (_g, root) = temp_vault();
+        let note = write_note(NewNote { title: "Bike fit".into(), category: "Fitness".into(), tags: vec![], status: String::new(), body: "saddle 2cm up".into(), source: "telegram".into() }).unwrap();
+        let t = write_transcript(NewTranscript {
+            title: note.title(),
+            kind: "note".into(),
+            source: "voice memo, 1m02s".into(),
+            linked: note.rel.clone(),
+            text: "so the saddle goes up about two centimetres".into(),
+        })
+        .unwrap();
+        assert!(t.rel.starts_with("transcripts/"), "{}", t.rel);
+        assert_eq!(t.str("of"), format!("[[{}|Bike fit]]", note.rel));
+        assert!(t.body.contains("two centimetres"), "the words are kept verbatim");
+        let back = read(&note.path).unwrap();
+        assert_eq!(back.str("transcript"), format!("[[{}]]", t.rel));
         let _ = fs::remove_dir_all(root);
     }
 

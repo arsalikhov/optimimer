@@ -16,6 +16,7 @@ mod shopper;
 mod vault;
 mod convo;
 mod store;
+mod sweep;
 mod telegram;
 mod transcribe;
 mod vision;
@@ -108,6 +109,16 @@ async fn main() {
             if vault::memory_mirror_count() == 0 && memory::global().node_count() > 0 {
                 tracing::info!("memory mirror: wrote {} note(s)", memory::mirror_all());
             }
+            // Memory notes deleted in Obsidian while the bot was down are
+            // deletions: catch up before anything reads the graph again.
+            match sweep::reconcile() {
+                0 => {}
+                n => tracing::info!("memory: forgot {n} entr{} deleted in the vault", if n == 1 { "y" } else { "ies" }),
+            }
+            match vault::purge_trash() {
+                0 => {}
+                n => tracing::info!("bin: {n} memor{} past {} days, gone for good", if n == 1 { "y" } else { "ies" }, vault::trash_days()),
+            }
             match vault::ensure_starter_files() {
                 Ok(w) if !w.is_empty() => tracing::info!("wrote vault starter files: {}", w.join(", ")),
                 Ok(_) => {}
@@ -149,6 +160,10 @@ async fn main() {
     // Shopper: backs /watch — hourly re-checks of product pages, pinging the
     // chat when something comes back in stock.
     tokio::spawn(shopper::run_worker(shopper::init(db.clone())));
+
+    // Memory sweep: once a week a strong model folds duplicate entries in the
+    // knowledge graph together. Only entries it hasn't seen before are read.
+    tokio::spawn(sweep::run_worker());
 
     // Convo notes: summaries + transcripts of forwarded messages and long voice
     // memos (index in SQLite; the Markdown copy lands in the vault).
