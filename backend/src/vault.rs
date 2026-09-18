@@ -28,6 +28,10 @@ pub const SUMMARIES: &str = "summaries";
 /// Spoken *commands* ("add milk to the list") never land here — only what was
 /// kept. The note or summary is the tidied version; this is the recording.
 pub const TRANSCRIPTS: &str = "transcripts";
+/// Photos the user sent that a note, task or summary was made from. The image
+/// file itself lives here; the doc embeds it with `![[attachments/…]]`, which is
+/// how Obsidian shows a picture inline.
+pub const ATTACHMENTS: &str = "attachments";
 /// Ledger mirror: one small note per transaction so Obsidian Bases can chart them.
 pub const FINANCE: &str = "finance";
 /// Knowledge-graph mirror: one flat note per memory node (people, projects, categories, facts…),
@@ -46,7 +50,7 @@ pub fn dir() -> PathBuf {
 /// Create the vault folders. Call once at startup; harmless if they exist.
 pub fn init() -> Result<PathBuf> {
     let root = dir();
-    for sub in [NOTES, TASKS, SUMMARIES, TRANSCRIPTS, FINANCE, MEMORY, TRASH] {
+    for sub in [NOTES, TASKS, SUMMARIES, TRANSCRIPTS, ATTACHMENTS, FINANCE, MEMORY, TRASH] {
         fs::create_dir_all(root.join(sub))?;
     }
     Ok(root)
@@ -680,6 +684,71 @@ pub fn write_transcript(t: NewTranscript) -> Result<Doc> {
 }
 
 // ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+pub struct NewPhoto {
+    /// The title of the note, task or summary this photo became.
+    pub title: String,
+    /// Vault path (no `.md`) of that doc. May be empty if the file write
+    /// failed, in which case the image is filed on its own.
+    pub linked: String,
+    /// The image itself.
+    pub bytes: Vec<u8>,
+    /// Its MIME type, e.g. `image/jpeg`; the extension comes from this.
+    pub mime: String,
+}
+
+/// `<base>.<ext>`, suffixed " 2", " 3"… if taken — `fresh_path` for a file that
+/// isn't Markdown.
+fn fresh_file(sub: &str, base: &str, ext: &str) -> PathBuf {
+    let base = filename(base);
+    let d = dir().join(sub);
+    let mut p = d.join(format!("{base}.{ext}"));
+    let mut n = 2;
+    while p.exists() {
+        p = d.join(format!("{base} {n}.{ext}"));
+        n += 1;
+    }
+    p
+}
+
+fn image_ext(mime: &str) -> &'static str {
+    match mime.trim().to_lowercase().as_str() {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/heic" | "image/heif" => "heic",
+        _ => "jpg",
+    }
+}
+
+/// File the photo a note, task or summary was made from, and embed it in that
+/// doc so opening the note in Obsidian shows the picture above the text the
+/// model read off it. Returns the image's vault path.
+pub fn write_photo(p: NewPhoto) -> Result<String> {
+    let d = dir().join(ATTACHMENTS);
+    fs::create_dir_all(&d)?;
+    let path = fresh_file(ATTACHMENTS, &p.title, image_ext(&p.mime));
+    fs::write(&path, &p.bytes)?;
+    let rel = format!(
+        "{ATTACHMENTS}/{}",
+        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    );
+    if !p.linked.is_empty() {
+        let doc_path = dir().join(format!("{}.md", p.linked));
+        if let Some(mut doc) = read(&doc_path) {
+            doc.set("photo", Value::String(format!("[[{rel}]]")));
+            doc.body = format!("![[{rel}]]\n\n{}", doc.body.trim_start());
+            if let Err(e) = save(&doc) {
+                tracing::warn!("couldn't embed the photo in {}: {e}", p.linked);
+            }
+        }
+    }
+    Ok(rel)
+}
+
+// ---------------------------------------------------------------------------
 // Finance mirror
 // ---------------------------------------------------------------------------
 
@@ -1186,6 +1255,26 @@ mod tests {
         assert!(t.body.contains("two centimetres"), "the words are kept verbatim");
         let back = read(&note.path).unwrap();
         assert_eq!(back.str("transcript"), format!("[[{}]]", t.rel));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_photo_is_filed_and_embedded() {
+        let (_g, root) = temp_vault();
+        let note = write_note(NewNote { title: "Whiteboard plan".into(), category: "Work".into(), tags: vec![], status: String::new(), body: "three columns".into(), source: "telegram".into() }).unwrap();
+        let rel = write_photo(NewPhoto {
+            title: note.title(),
+            linked: note.rel.clone(),
+            bytes: b"not really a jpeg".to_vec(),
+            mime: "image/png".into(),
+        })
+        .unwrap();
+        assert_eq!(rel, "attachments/Whiteboard plan.png");
+        assert!(root.join(&rel).exists(), "the image itself is on disk");
+        let back = read(&note.path).unwrap();
+        assert_eq!(back.str("photo"), format!("[[{rel}]]"));
+        assert!(back.body.starts_with(&format!("![[{rel}]]")), "embedded above the text: {}", back.body);
+        assert!(back.body.contains("three columns"), "the note's own text survives");
         let _ = fs::remove_dir_all(root);
     }
 

@@ -7,7 +7,8 @@ Money lives in a `transactions` table in the SQLite database; all arithmetic hap
 - "spent 12.50 on lunch at Joe's" → expense with merchant, category (Groceries, Dining, Transport, Housing,
   Utilities, Health, Entertainment, Shopping, Subscriptions, Travel, Loans, Cash, Other) and date.
 - "earned 3000 salary" → income; regular pay is category Salary.
-- A **receipt photo** is OCR'd (`OCR_MODEL`) into the same form.
+- A **receipt photo** sent on its own is read (`OCR_MODEL`) into the same form. With a caption it goes to the bot
+  as an ordinary photo instead — see [Using the bot](using-the-bot.md#photos) — which still gets the amount.
 - "my monthly income is 4000" sets the figure the balance view compares against.
 
 ## CSV import

@@ -66,9 +66,26 @@ items and the full transcript folded into a collapsible block, and saves it to `
 forward and it is used as the brief ("what did we decide about the venue?"); without one the bot asks, and you can
 reply or tap *Summarize as-is*. Forwarded voice messages are transcribed into the transcript.
 
+## Photos
+
+Send a picture and a vision model (`OCR_MODEL`) reads it: what it shows, plus any text on it transcribed verbatim.
+That reading becomes an ordinary turn for the bot, so a photo is context like anything else you type. Add a caption
+to say what you want done with it:
+
+- "save this" on a whiteboard, a slide or a page of handwriting → a note with the text written out.
+- "put this in the calendar" on a flyer or an invitation → a task with the date and place off the picture.
+- "remember this" on a business card or a label → the details go into the memory graph.
+- no caption → the bot decides: a receipt is logged, something with a date in it becomes a task, a page of text
+  becomes a note, and anything else gets a sentence about what it sees and an offer to keep it.
+
+Whenever a photo is *kept* — as a note, a task or a summary — the image itself is filed under `attachments/` in the
+vault and embedded at the top of that file, so the note shows the picture it came from. A photo you only asked a
+question about is not kept. Forwarded pictures are read the same way and go into the batch summary.
+
 ## Receipts and bank statements
 
-- A **photo** of a receipt is OCR'd and logged as an expense (amount, merchant, date).
+- A **photo** of a receipt sent on its own is read and logged as an expense (amount, merchant, date) — no caption
+  needed. With a caption it goes to the bot instead, which still gets the amount and can do what you asked.
 - A **CSV** bank or card statement is imported: rows are classified (expense, income, transfer, refund), de-duplicated
   by date + amount + payee, and card payments or salary are never double-counted. See [Finance](finance.md).
 
@@ -78,6 +95,7 @@ reply or tap *Summarize as-is*. Forwarded voice messages are transcribed into th
 | -------- | ------------- |
 | tasks, notes, memos, summaries | Markdown files in the vault (`tasks/`, `notes/`, `summaries/`) |
 | voice kept as a note or summary | the words as transcribed, in `transcripts/`, linked to it |
+| a photo kept as a note, task or summary | the image in `attachments/`, embedded in that file |
 | money | the SQLite ledger, mirrored to `finance/` notes and `Charts.md` |
 | facts, people, preferences | the memory graph, mirrored to `memory/` notes |
 | lists, reminders, watches, settings | SQLite only |

@@ -7,8 +7,9 @@
 //! watches, Wake-on-LAN, timezone, and long-term memory recall.
 //!
 //! Non-text inputs still have dedicated paths (`media.rs`): voice → transcribe
-//! → agent (or memo), receipt photo → OCR → ledger, CSV → import, forwarded
-//! messages → summary batch (`summaries.rs`), location pin → timezone.
+//! → agent (or memo), photo → a vision model reads it → agent (a bare receipt
+//! goes straight to the ledger), CSV → import, forwarded messages → summary
+//! batch (`summaries.rs`), location pin → timezone.
 //!
 //! Access: a chat pairs by sending the setup code (owner) or an invite code
 //! (member) — see `crate::config` — and is then walked through `onboarding.rs`.
@@ -87,6 +88,11 @@ struct BotState {
     /// is filed verbatim under `transcripts/`; a spoken command consumes
     /// nothing and the slot is simply dropped. See `media::take_voice`.
     voice: Arc<Mutex<HashMap<i64, VoiceTake>>>,
+    /// The photo being handled right now, same deal as `voice`: if the turn
+    /// saves a note, a task or a summary, the image is filed in the vault and
+    /// embedded in that file; otherwise the slot is dropped. See
+    /// `media::take_photo`.
+    photo: Arc<Mutex<HashMap<i64, PhotoTake>>>,
 }
 
 /// One transcribed recording waiting to be claimed by whatever the turn saves.
@@ -96,6 +102,14 @@ struct VoiceTake {
     text: String,
     /// e.g. "voice memo, 1m20s".
     source: String,
+}
+
+/// One photo waiting to be claimed by whatever the turn saves.
+#[derive(Clone)]
+struct PhotoTake {
+    bytes: Vec<u8>,
+    /// e.g. "image/jpeg" — decides the attachment's extension.
+    mime: String,
 }
 
 impl BotState {
@@ -182,6 +196,7 @@ pub async fn run_bot(store: Store, db: Db) {
         allowed: Arc::new(allowed),
         turns: Arc::new(Mutex::new(HashMap::new())),
         voice: Arc::new(Mutex::new(HashMap::new())),
+        photo: Arc::new(Mutex::new(HashMap::new())),
     };
     let mut offset: i64 = 0;
 
@@ -294,16 +309,26 @@ pub async fn run_bot(store: Store, db: Db) {
                 continue;
             }
 
-            // Photo of a receipt/invoice → OCR → log as an expense via /spent.
+            // A photo → read it, then let the agent act on what it shows (a
+            // bare receipt is logged as an expense without the detour).
             if let Some(photos) = msg.get("photo").and_then(|p| p.as_array()).filter(|a| !a.is_empty()) {
                 // Telegram sends multiple sizes ascending; the last is the largest.
                 if let Some(fid) = photos.last().and_then(|p| p["file_id"].as_str()) {
-                    handle_receipt(&client, &api, &token, &state, chat_id, fid, "image/jpeg").await;
+                    let caption = msg["caption"].as_str().unwrap_or("").trim().to_string();
+                    // Reading a picture and then acting on it is a full agent
+                    // turn, so it runs off the loop under the chat's turn lock —
+                    // other chats keep flowing, and an album stays in order.
+                    let (client, api, token, state, fid) =
+                        (client.clone(), api.clone(), token.clone(), state.clone(), fid.to_string());
+                    tokio::spawn(async move {
+                        let _turn = state.turn_lock(chat_id).lock_owned().await;
+                        handle_photo(&client, &api, &token, &state, chat_id, &fid, "image/jpeg", &caption).await;
+                    });
                 }
                 continue;
             }
 
-            // A document: a CSV statement → bulk import; an image → treat as a receipt.
+            // A document: a CSV statement → bulk import; an image → read as a photo.
             if let Some(doc) = msg.get("document").filter(|d| !d.is_null()) {
                 let name = doc["file_name"].as_str().unwrap_or("").to_lowercase();
                 let mime = doc["mime_type"].as_str().unwrap_or("").to_string();
@@ -312,10 +337,11 @@ pub async fn run_bot(store: Store, db: Db) {
                     if name.ends_with(".csv") || mime.contains("csv") || mime == "text/comma-separated-values" {
                         handle_csv(&client, &api, &token, &state, chat_id, fid, &name, caption).await;
                     } else if mime.starts_with("image/") {
-                        handle_receipt(&client, &api, &token, &state, chat_id, fid, &mime).await;
+                        handle_photo(&client, &api, &token, &state, chat_id, fid, &mime, caption).await;
                     } else {
                         send(&client, &api, chat_id, &Reply::text(
-                            "Send a receipt photo to log an expense, or a .csv statement to import transactions.",
+                            "Send a photo (with a caption if you want something specific done with it), \
+                             or a .csv statement to import transactions.",
                         )).await;
                     }
                 }

@@ -14,12 +14,24 @@ pub(super) async fn handle_forward(
     msg: &Value,
 ) {
     convo::touch(chat_id);
-    let text = match convo::audio_file_id(msg) {
-        Some(fid) => match fetch_transcript(client, api, token, fid).await {
+    let photo = msg
+        .get("photo")
+        .and_then(|p| p.as_array())
+        .filter(|a| !a.is_empty())
+        .and_then(|a| a.last())
+        .and_then(|p| p["file_id"].as_str());
+    let text = match (convo::audio_file_id(msg), photo) {
+        (Some(fid), _) => match fetch_transcript(client, api, token, fid).await {
             Ok(t) => format!("🎤 {t}"),
             Err(e) => format!("[voice message — {e}]"),
         },
-        None => convo::message_body(msg),
+        // A forwarded picture is read too, so the summary is about what was
+        // shared rather than about "[photo]".
+        (None, Some(fid)) => {
+            let caption = msg["caption"].as_str().unwrap_or("");
+            describe_forward_photo(client, api, token, fid, caption).await
+        }
+        (None, None) => convo::message_body(msg),
     };
     let tz = tz_for(state, chat_id);
     let item = convo::FwdItem {
@@ -142,6 +154,8 @@ async fn build_convo(state: &BotState, chat_id: i64, kind: &str, source: &str, t
     });
     if let Ok(doc) = &file {
         saved.file = doc.rel.clone();
+        // A summary made from a photo keeps the picture it was made from.
+        file_photo(state, chat_id, doc);
         // A recording kept as a summary also gets filed verbatim. `take_voice`
         // covers memos the user spoke; a forwarded batch carries its own voice
         // notes, marked 🎤 by `handle_forward` when they were transcribed.

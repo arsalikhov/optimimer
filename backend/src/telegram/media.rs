@@ -1,4 +1,6 @@
-//! Non-text inputs: voice notes (transcribe → route or memo), receipt photos (OCR → /spent), CSV statements.
+//! Non-text inputs: voice notes (transcribe → route or memo), photos (read by a
+//! vision model → a turn for the agent, or straight to the ledger when it's a
+//! bare receipt), CSV statements.
 
 use super::*;
 
@@ -168,9 +170,53 @@ pub(super) async fn download_file(
     Some(bytes.to_vec())
 }
 
-/// Receipt/invoice image → OCR to a "Spent X at Y on Z" line → run `/spent`,
-/// which parses + categorizes it like any typed expense.
-pub(super) async fn handle_receipt(
+/// Hold the photo behind this turn, so whatever the turn saves can file the
+/// image itself in the vault next to the text. Mirrors `hold_voice`.
+fn hold_photo(state: &BotState, chat_id: i64, bytes: &[u8], mime: &str) {
+    if let Ok(mut slot) = state.photo.lock() {
+        slot.insert(chat_id, PhotoTake { bytes: bytes.to_vec(), mime: mime.to_string() });
+    }
+}
+
+/// Claim the photo behind this turn — called by the code that has just written
+/// a note, a task or a summary. Taking it clears the slot, so one photo is
+/// filed once even when a turn saves several things.
+pub(super) fn take_photo(state: &BotState, chat_id: i64) -> Option<PhotoTake> {
+    state.photo.lock().ok()?.remove(&chat_id)
+}
+
+/// Drop an unclaimed photo at the end of a turn: a picture the user only asked
+/// a question about is not something to keep.
+fn drop_photo(state: &BotState, chat_id: i64) {
+    if let Ok(mut slot) = state.photo.lock() {
+        slot.remove(&chat_id);
+    }
+}
+
+/// File the photo behind this turn alongside the doc it became, so the note,
+/// task or summary shows the picture it was made from. A no-op when the turn
+/// had no photo, which is the usual case.
+pub(super) fn file_photo(state: &BotState, chat_id: i64, doc: &crate::vault::Doc) {
+    let Some(p) = take_photo(state, chat_id) else { return };
+    if let Err(e) = crate::vault::write_photo(crate::vault::NewPhoto {
+        title: doc.title(),
+        linked: doc.rel.clone(),
+        bytes: p.bytes,
+        mime: p.mime,
+    }) {
+        tracing::warn!("vault photo write failed: {e}");
+    }
+}
+
+/// A photo the user sent: read it with a vision model, then hand the reading to
+/// the agent as an ordinary turn, so the picture can become a note, a task, a
+/// memory, a summary or an answer — whatever the caption asks for.
+///
+/// The one shortcut is a receipt sent on its own, with nothing said about it:
+/// that still goes straight to the ledger, the way it always has. A receipt
+/// *with* a caption goes to the agent instead, which gets the same
+/// `Spent … at … on …` line and can log it or do what was actually asked.
+pub(super) async fn handle_photo(
     client: &reqwest::Client,
     api: &str,
     token: &str,
@@ -178,18 +224,81 @@ pub(super) async fn handle_receipt(
     chat_id: i64,
     file_id: &str,
     mime: &str,
+    caption: &str,
 ) {
     let bytes = match download_file(client, api, token, file_id).await {
         Some(b) => b,
         None => return send(client, api, chat_id, &Reply::text("Couldn't download that image.")).await,
     };
-    let sentence = match crate::vision::read_receipt(bytes, mime).await {
-        Ok(s) => s,
-        Err(e) => return send(client, api, chat_id, &Reply::text(format!("Couldn't read the receipt: {e}"))).await,
+    typing(client, api, chat_id).await;
+    let look = match crate::vision::look(&bytes, mime, caption).await {
+        Ok(l) => l,
+        Err(e) => return send(client, api, chat_id, &Reply::text(format!("Couldn't read that image: {e}"))).await,
     };
-    send(client, api, chat_id, &Reply::text(format!("_{sentence}_"))).await;
-    let reply = handle_money(state, chat_id, "spent", &sentence).await;
-    send(client, api, chat_id, &reply).await;
+
+    if look.is_receipt() && caption.trim().is_empty() {
+        send(client, api, chat_id, &Reply::text(format!("_{}_", look.expense))).await;
+        let reply = handle_money(state, chat_id, "spent", &look.expense).await;
+        return send(client, api, chat_id, &reply).await;
+    }
+
+    // Offered to every tool the turn calls; only one that saves a file keeps it.
+    hold_photo(state, chat_id, &bytes, mime);
+    let turn = photo_turn(&look, caption);
+    if let Some(reply) = run_agent(client, api, state, chat_id, &turn).await {
+        send(client, api, chat_id, &reply).await;
+    }
+    drop_photo(state, chat_id);
+}
+
+/// The message the agent sees for a photo. The model can't see the image, so
+/// the description stands in for it — marked as a description, not as the
+/// user's own words, and with the caption kept separate underneath.
+fn photo_turn(look: &crate::vision::Look, caption: &str) -> String {
+    let mut t = format!(
+        "[The user sent a photo ({}). You can't see it; this is a description of what it shows, \
+         not something they said:\n{}\n]",
+        look.kind,
+        look.text.trim()
+    );
+    if !look.expense.is_empty() {
+        t.push_str(&format!("\n[It reads as a receipt for: {}]", look.expense));
+    }
+    let caption = caption.trim();
+    if caption.is_empty() {
+        t.push_str("\n\n(Sent without a caption.)");
+    } else {
+        t.push_str(&format!("\n\n{caption}"));
+    }
+    t
+}
+
+/// A photo inside a forwarded batch: describe it so the summary is about what
+/// was actually shared, not about "[photo]". Failure degrades to a marker —
+/// one unreadable image shouldn't sink the batch.
+pub(super) async fn describe_forward_photo(
+    client: &reqwest::Client,
+    api: &str,
+    token: &str,
+    file_id: &str,
+    caption: &str,
+) -> String {
+    let Some(bytes) = download_file(client, api, token, file_id).await else {
+        return "[photo — couldn't download it]".to_string();
+    };
+    match crate::vision::look(&bytes, "image/jpeg", caption).await {
+        Ok(look) => {
+            let mut t = format!("🖼 {}", look.text.trim());
+            if !caption.trim().is_empty() {
+                t.push_str(&format!("\n{}", caption.trim()));
+            }
+            t
+        }
+        Err(e) => {
+            tracing::warn!("forwarded photo unreadable: {e}");
+            format!("[photo — {e}]")
+        }
+    }
 }
 
 /// CSV bank/credit-card statement → bulk import into Finances, skipping rows whose
@@ -274,6 +383,27 @@ pub(super) async fn get_file_path(client: &reqwest::Client, api: &str, file_id: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_photo_turn_keeps_the_reading_apart_from_the_caption() {
+        let board = crate::vision::Look {
+            kind: "whiteboard".into(),
+            text: "Three columns: To do, Doing, Done.".into(),
+            expense: String::new(),
+        };
+        let turn = photo_turn(&board, "save this");
+        assert!(turn.contains("Three columns"), "the reading is there: {turn}");
+        assert!(turn.trim_end().ends_with("save this"), "the caption is last, unbracketed: {turn}");
+
+        let receipt = crate::vision::Look {
+            kind: "receipt".into(),
+            text: "A till receipt from Joe's.".into(),
+            expense: "Spent 12.00 at Joe's on 2026-09-18".into(),
+        };
+        let turn = photo_turn(&receipt, "");
+        assert!(turn.contains("Spent 12.00 at Joe's on 2026-09-18"), "the agent can still log it: {turn}");
+        assert!(turn.contains("without a caption"), "and knows nothing was asked: {turn}");
+    }
 
     #[test]
     fn memo_keyword_is_whole_word_and_stripped() {

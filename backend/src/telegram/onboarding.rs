@@ -158,7 +158,7 @@ async fn ask_models(chat_id: i64, prefix: String) -> Reply {
     with_buttons(
         format!(
             "{prefix}Which models should I use?\n\
-             • Free — OpenRouter's free models. No credits needed; slower and less accurate, and voice notes or receipt photos may misfire.\n\
+             • Free — OpenRouter's free models. No credits needed; slower and less accurate, and voice notes or photos may misfire.\n\
              • Paid — Claude Sonnet 4.6 / Haiku 4.5 and Voxtral, billed to your OpenRouter credits. Best results.\n\
              {money} You can switch any time by saying \"use paid models\" or \"use free models\"."
         ),

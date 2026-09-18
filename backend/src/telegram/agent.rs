@@ -396,6 +396,13 @@ fn system_prompt(state: &BotState, chat_id: i64) -> String {
          - When a tool says it was displayed to the user, do not repeat its contents; reply with one short sentence or nothing at all.\n\
          - Confirmations for destructive actions are handled by buttons; never assume they were tapped.\n\
          - Voice transcripts arrive as plain text; if one is clearly a thought-dump rather than a request, use `save_memo`.\n\
+         - A photo arrives as a bracketed description of what it shows, with the user's caption (if any) below it. \
+           Treat the description as context for the caption, and do what the caption asks — save a note or a task, \
+           remember something, answer a question about it. Whatever you save keeps the picture attached, so don't \
+           describe the image back to them; write down what it means. With no caption, decide from the picture: \
+           a receipt is `log_expense` using the line given, a whiteboard, slide, page or handwritten note is \
+           `save_note`, something with a date or an action in it is `create_task`, and anything else gets one \
+           short sentence saying what you see and an offer to keep it.\n\
          - Reply in plain text (no Markdown headers, no bullet spam), one to three short sentences, in the user's language. \
            Never invent tool results. If something failed, say so plainly."
     )
@@ -544,7 +551,7 @@ pub(super) fn clip(s: &str, n: usize) -> String {
 }
 
 /// "typing…" indicator while the model works.
-async fn typing(client: &reqwest::Client, api: &str, chat_id: i64) {
+pub(super) async fn typing(client: &reqwest::Client, api: &str, chat_id: i64) {
     let _ = client.post(format!("{api}/sendChatAction")).json(&json!({ "chat_id": chat_id, "action": "typing" })).send().await;
 }
 

@@ -51,7 +51,7 @@ An environment variable always overrides the stored setting of the same meaning.
 | -------- | ------- | ------- |
 | `FINANCE_PLACEHOLDERS` | unset | `1` seeds an empty ledger with sample rows (purged on the first real entry). |
 | `RENT_AMOUNTS` | unset | Exact e-transfer amounts to classify as rent → Housing. |
-| `OCR_MODEL` | `anthropic/claude-sonnet-4.6` | Vision model for receipt photos. |
+| `OCR_MODEL` | `anthropic/claude-sonnet-4.6` | Vision model that reads photos, receipts included. |
 | `FINANCE_MODEL` | `anthropic/claude-sonnet-4.6` | Classifies CSV statement rows. |
 
 ## Models
@@ -88,7 +88,7 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 | `MEMORY_SWEEP_MODEL` | `MAX_MODEL` | The weekly memory sweep (Opus on the paid tier). |
 | `CONVO_MODEL` | tier default | Summaries of forwarded batches and voice memos. |
 | `FINANCE_MODEL` | tier default | CSV statement classification. |
-| `OCR_MODEL` | tier default | Receipt photos (needs image input). |
+| `OCR_MODEL` | tier default | Reading photos (needs image input). |
 | `TRANSCRIBE_MODEL` | tier default | Voice transcription (needs audio input). |
 | `SHOPPER_MODEL` | tier default | Reads product pages for stock watches. |
 

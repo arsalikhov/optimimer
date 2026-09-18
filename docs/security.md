@@ -21,7 +21,7 @@ Paired chats live in the `chats` table of the SQLite database; delete a row to r
 - Backend ↔ Telegram is TLS. Updates arrive by **long polling**, so the Pi opens **no inbound port**.
 - Bot chats are **not end-to-end encrypted** and cannot be — Telegram bots cannot use Secret Chats, so Telegram's
   servers see message content. Each leg (phone ↔ Telegram, Telegram ↔ Pi) is encrypted in transit.
-- LLM calls go to OpenRouter over TLS; message text, voice transcripts and receipt photos are sent there for
+- LLM calls go to OpenRouter over TLS; message text, voice transcripts and any photo you send are sent there for
   processing. Pick models you are comfortable with in [Configuration](configuration.md).
 - The HTTP API (agent editor) binds to `127.0.0.1` only. Reach the web UI over an SSH tunnel:
   `ssh -L 8799:localhost:8799 user@pi`, then open http://localhost:8799.

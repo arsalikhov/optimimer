@@ -53,7 +53,7 @@ struct Set {
     parser: &'static str,
     /// Cheap background work (memory extraction, reminders, email drafts).
     cheap: &'static str,
-    /// Receipt photos (needs image input).
+    /// Reading photos, receipts included (needs image input).
     ocr: &'static str,
     /// Voice notes (needs audio input).
     transcribe: &'static str,

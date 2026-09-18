@@ -87,6 +87,8 @@ pub(super) async fn handle_todo(state: &BotState, chat_id: i64, body: &str) -> R
     };
     crate::charts::refresh_gantt();
     crate::memory::link_vault_doc("task", &doc);
+    // A task made from a photo (a flyer, an invitation, a form) keeps it.
+    file_photo(state, chat_id, &doc);
     let esc = vault::html_escape;
     let when = if start.is_empty() {
         "no date".to_string()
@@ -152,6 +154,8 @@ pub(super) async fn handle_note(state: &BotState, chat_id: i64, body: &str) -> R
     match vault::write_note(note) {
         Ok(doc) => {
             crate::memory::link_vault_doc("note", &doc);
+            // Sent as a photo? Keep the picture next to what was read off it.
+            file_photo(state, chat_id, &doc);
             // Spoken? Keep what was actually said next to the tidied note.
             if let Some(v) = take_voice(state, chat_id) {
                 if let Err(e) = vault::write_transcript(vault::NewTranscript {

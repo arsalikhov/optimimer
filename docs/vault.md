@@ -12,6 +12,7 @@ be queried with **Obsidian Bases** — no plugins needed for the core views.
 | `notes/` | Notes with `category`, `tags`, `status` (inbox / draft / final) |
 | `summaries/` | Forwarded-chat summaries and voice memos, transcript included |
 | `transcripts/` | What was said in a recording kept as a note or summary, linked both ways |
+| `attachments/` | Photos that became a note, task or summary, embedded at the top of that file |
 | `finance/` | One small note per ledger row (`amount`, `direction`, `category`, `source`, `flagged`) |
 | `memory/` | The knowledge graph as wikilinked notes (people, projects, places, facts) |
 | `trash/` | Memories the bot dropped, recoverable for `TRASH_DAYS` (30) — see [Memory](memory.md) |
@@ -38,6 +39,14 @@ exactly as they were transcribed, and the two files link to each other: the tran
 note or summary gets a `transcript: [[…]]` property. Spoken *commands* ("add milk to the list") are never filed:
 if a recording does not end up saved as a note or a summary, its transcript is dropped with the turn. Transcripts
 stay out of the knowledge graph on purpose, so recall keeps returning facts rather than raw speech.
+
+## Attachments
+
+A photo that is kept — as a note, a task or a summary — is written to `attachments/` under the title of the file it
+became (`attachments/Whiteboard plan.jpg`), embedded as `![[…]]` at the top of that file and recorded in its
+`photo` property. The text in the file is what the vision model read off the picture, so the note is searchable
+while the image stays there to check it against. A photo you only asked a question about is dropped with the turn,
+the same way a spoken command is.
 
 ## Categories and projects
 
