@@ -62,6 +62,27 @@ pub(super) fn memo_by_keyword(transcript: &str) -> Option<String> {
     None
 }
 
+/// Jev must be this sure a short recording is a memo before it skips the agent.
+const MEMO_MIN: f64 = 0.8;
+
+/// Is this transcript a thought-dump to keep (a memo) rather than a request
+/// for the assistant? False when Jev is off or unsure — the agent can still
+/// call `save_memo` itself.
+async fn is_thought_dump(transcript: &str) -> bool {
+    let q = crate::jev::Q::noul(
+        "The user sent this voice note to their personal assistant. Is it a thought-dump to be kept as a memo, rather than a request or question for the assistant to act on?",
+        "Rambling thoughts, ideas, reflections or notes to self, with nothing asked of the assistant",
+        "A request, command or question for the assistant (add a task, set a reminder, log spending, look something up, …)",
+    );
+    match crate::jev::noul(json!(transcript), q).await {
+        Some(p) => {
+            tracing::info!("voice memo check: {p:.2}");
+            p >= MEMO_MIN
+        }
+        None => false,
+    }
+}
+
 pub(super) fn fmt_duration(secs: u64) -> String {
     if secs >= 60 {
         format!("{}m{:02}s", secs / 60, secs % 60)
@@ -93,6 +114,10 @@ pub(super) async fn handle_voice(
         return finalize_convo(client, api, state, chat_id, "voice", &source, &body, "").await;
     }
     if duration_secs >= voice_memo_secs() {
+        return finalize_convo(client, api, state, chat_id, "voice", &source, &transcript, "").await;
+    }
+    // No opener and short: Jev tells a spoken thought-dump from a request.
+    if is_thought_dump(&transcript).await {
         return finalize_convo(client, api, state, chat_id, "voice", &source, &transcript, "").await;
     }
 
@@ -160,7 +185,10 @@ pub(super) async fn handle_csv(
     let csv = String::from_utf8_lossy(&bytes).to_string();
     // Detect account type (Amex 'activity' = credit; BMO 'statement' = credit or
     // chequing, told apart by the header) so credits are read correctly.
-    let account = crate::finance::detect_account(file_name, caption, &csv);
+    let mut account = crate::finance::detect_account(file_name, caption, &csv);
+    if account.is_empty() && crate::jev::enabled() {
+        account = crate::finance::infer_account(&csv).await;
+    }
     let label = if account.is_empty() { "auto-detecting type".to_string() } else { format!("{account} statement") };
     send(client, api, chat_id, &Reply::text(format!("Importing transactions ({label})…"))).await;
     let tz = tz_for(state, chat_id);
@@ -188,6 +216,13 @@ pub(super) async fn handle_csv(
                     "\n⚠️ {} row{} flagged as a *likely duplicate* (same amount as an existing transaction) — see /transactions to review and remove it.",
                     s.flagged,
                     if s.flagged == 1 { "" } else { "s" }
+                ));
+            }
+            if s.uncertain > 0 {
+                msg.push_str(&format!(
+                    "\n❓ {} row{} with an *unsure category* — tagged in the note; see /transactions.",
+                    s.uncertain,
+                    if s.uncertain == 1 { "" } else { "s" }
                 ));
             }
             Reply::text(msg)

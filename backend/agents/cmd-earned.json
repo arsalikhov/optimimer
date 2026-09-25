@@ -19,6 +19,19 @@
       }
     },
     {
+      "id": "jev_category",
+      "type": "jev",
+      "position": { "x": 320, "y": 380 },
+      "data": {
+        "label": "Pick category (Jev)",
+        "kind": "choice",
+        "state": "{{input.text}}",
+        "instructions": "Is this income regular wages or other money in?",
+        "options": "Salary: regular wages, payroll or a paycheck from an employer\nIncome: anything else — a refund, a gift, freelance work, a government or tax deposit, interest",
+        "min_confidence": "0.6"
+      }
+    },
+    {
       "id": "out",
       "type": "output",
       "position": { "x": 640, "y": 200 },
@@ -27,6 +40,7 @@
   ],
   "edges": [
     { "id": "e1", "source": "trigger_1", "target": "parse" },
-    { "id": "e2", "source": "parse", "target": "out" }
+    { "id": "e2", "source": "parse", "target": "out" },
+    { "id": "e_jev", "source": "trigger_1", "target": "jev_category" }
   ]
 }

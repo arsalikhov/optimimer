@@ -238,12 +238,12 @@ fn days_apart(a: &str, b: &str) -> Option<i64> {
     Some((pa - pb).num_days().abs())
 }
 
-/// Reduce existing rows to `(amount_cents, date, direction)` for the
+/// Reduce existing rows to `(amount_cents, date, direction, name)` for the
 /// "same amount, different fingerprint" near-duplicate check.
-fn dup_index(txns: &[Txn]) -> Vec<(i64, String, String)> {
+fn dup_index(txns: &[Txn]) -> Vec<(i64, String, String, String)> {
     txns.iter()
         .filter(|t| !t.date.is_empty())
-        .map(|t| ((t.amount.abs() * 100.0).round() as i64, t.date.clone(), t.direction.clone()))
+        .map(|t| ((t.amount.abs() * 100.0).round() as i64, t.date.clone(), t.direction.clone(), t.name.clone()))
         .collect()
 }
 
@@ -251,19 +251,51 @@ fn dup_index(txns: &[Txn]) -> Vec<(i64, String, String)> {
 /// a hand-typed entry and the bank's version of it (different description, a
 /// posting date a day or two off). So when a new transaction shares an existing
 /// one's amount + direction within a few days but has a DIFFERENT fingerprint,
-/// flag it for manual review instead of guessing — return the Note text to stamp
-/// on it. (Date-bounded so a recurring same-amount charge weeks later is ignored.)
-fn likely_dup_note(prior: &[(i64, String, String)], cents: i64, direction: &str, date: &str) -> Option<String> {
-    let hit = prior.iter().find(|(c, d, dir)| {
+/// it is a candidate duplicate. (Date-bounded so a recurring same-amount charge
+/// weeks later is ignored.)
+fn likely_dup<'a>(prior: &'a [(i64, String, String, String)], cents: i64, direction: &str, date: &str) -> Option<&'a (i64, String, String, String)> {
+    prior.iter().find(|(c, d, dir, _)| {
         *c == cents
             && dir.eq_ignore_ascii_case(direction)
             && days_apart(d, date).is_some_and(|n| n <= MANUAL_DUP_WINDOW_DAYS)
-    })?;
-    Some(format!(
+    })
+}
+
+fn dup_note(cents: i64, hit_date: &str) -> String {
+    format!(
         "⚠️ Likely duplicate — same amount (${:.2}) and direction as an existing transaction dated {}. Review and delete if redundant.",
         cents as f64 / 100.0,
-        hit.1.get(0..10).unwrap_or(&hit.1),
-    ))
+        hit_date.get(0..10).unwrap_or(hit_date),
+    )
+}
+
+/// Below this Jev probability that two entries are the same payment, a
+/// same-amount neighbour is a coincidence (two $4.50 coffees) and isn't flagged.
+const SAME_TXN_MIN: f64 = 0.3;
+
+/// The near-duplicate note to stamp on a new row, if any. Amount, direction and
+/// date only find the candidate; with Jev on, it also has to plausibly be the
+/// same payment by name ("SQ *BLUE BOTTLE 0042" vs "coffee at blue bottle").
+async fn dup_note_checked(prior: &[(i64, String, String, String)], cents: i64, direction: &str, date: &str, name: &str) -> Option<String> {
+    let hit = likely_dup(prior, cents, direction, date)?;
+    let q = crate::jev::Q::noul(
+        "Are these two ledger entries the same real-world payment recorded twice (for example once typed by hand and once from the bank statement)?",
+        "The same payment: the payee descriptions refer to the same merchant or person",
+        "Two separate payments that merely share an amount",
+    );
+    let state = json!({
+        "amount": format!("{:.2}", cents as f64 / 100.0),
+        "direction": direction,
+        "new_entry": { "description": name, "date": date },
+        "existing_entry": { "description": hit.3, "date": hit.1 },
+    });
+    if let Some(p) = crate::jev::noul(state, q).await {
+        if p < SAME_TXN_MIN {
+            tracing::info!("not flagging a same-amount neighbour as duplicate (jev {p:.2})");
+            return None;
+        }
+    }
+    Some(dup_note(cents, &hit.1))
 }
 
 fn money(x: f64) -> String {
@@ -541,6 +573,8 @@ pub struct ImportSummary {
     pub transfers: usize,
     /// Created but tagged "likely duplicate" in their Note for you to review.
     pub flagged: usize,
+    /// Created, but the category classifier wasn't sure — tagged in their Note.
+    pub uncertain: usize,
     pub parsed: usize,
 }
 
@@ -556,7 +590,7 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
     }
     let parsed = rows.len();
     if parsed == 0 {
-        return Ok(ImportSummary { created: 0, skipped: 0, transfers: 0, flagged: 0, parsed: 0 });
+        return Ok(ImportSummary { created: 0, skipped: 0, transfers: 0, flagged: 0, uncertain: 0, parsed: 0 });
     }
 
     // Existing fingerprints (exact re-import dedup) and an amount/date/direction
@@ -570,6 +604,10 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
     let mut transfers = 0;
     let mut flagged = 0;
     let rents = rent_amounts();
+
+    // Pass 1: dedup and a first classification from the normalizer's labels.
+    struct Pending { row: Row, date: String, key: String, direction: &'static str, category: String, fixed: bool, unsure: Option<String> }
+    let mut pending: Vec<Pending> = Vec::new();
     for r in rows {
         if r.amount == 0.0 && r.description.trim().is_empty() {
             continue;
@@ -600,45 +638,80 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
         };
         // Deterministic overrides for known recurring payees the model otherwise
         // mislabels: rent e-transfers → Housing, NSLSC → Loans.
-        let (direction, category) = if is_rent(&r.description, r.amount, &rents) {
-            ("Expense", "Housing".to_string())
+        let fixed = if is_rent(&r.description, r.amount, &rents) {
+            Some(("Expense", "Housing".to_string()))
         } else if is_student_loan(&r.description) {
-            ("Expense", "Loans".to_string())
+            Some(("Expense", "Loans".to_string()))
         } else if is_savings(&r.description) {
-            ("Transfer", "Savings".to_string())
+            Some(("Transfer", "Savings".to_string()))
         } else if is_card_payment(&r.description) {
-            ("Transfer", "Card payment".to_string())
+            Some(("Transfer", "Card payment".to_string()))
         } else {
-            (direction, category)
+            None
         };
+        let (direction, category, fixed) = match fixed {
+            Some((d, c)) => (d, c, true),
+            None => (direction, category, false),
+        };
+        pending.push(Pending { row: r, date, key, direction, category, fixed, unsure: None });
+    }
 
+    // Pass 2: Jev re-picks each category within its direction; a row it can't
+    // place confidently keeps the normalizer's label but is flagged for review
+    // instead of quietly landing in "Other".
+    if crate::jev::enabled() {
+        let asks: Vec<(usize, TxnAsk)> = pending
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.fixed)
+            .map(|(i, p)| (i, TxnAsk { description: p.row.description.clone(), amount: p.row.amount.abs(), direction: p.direction }))
+            .collect();
+        let picks = refine_categories(account_hint, &asks.iter().map(|(_, a)| a.clone()).collect::<Vec<_>>()).await;
+        for ((i, _), pick) in asks.iter().zip(picks) {
+            let Some(pick) = pick else { continue };
+            let p = &mut pending[*i];
+            if pick.confidence >= CATEGORY_MIN_CONFIDENCE {
+                p.category = pick.choice.clone();
+            } else {
+                p.unsure = Some(format!("❓ Category unsure ({}) — review.", pick.top(2)));
+            }
+        }
+    }
+
+    // Pass 3: near-duplicate check and insert.
+    let mut uncertain = 0;
+    for p in pending {
         // Cross-source near-duplicate: this row's fingerprint is new, but its
         // amount + direction matches an existing transaction within a few days
         // (e.g. the bank's version of something you already logged by hand, or an
         // overlapping statement with a reworded description). Import it anyway,
         // but stamp a note so you can eyeball it in /transactions and remove it.
-        let row_cents = (r.amount.abs() * 100.0).round() as i64;
-        let note = likely_dup_note(&prior, row_cents, direction, &date);
+        let row_cents = (p.row.amount.abs() * 100.0).round() as i64;
+        let dup = dup_note_checked(&prior, row_cents, p.direction, &p.date, &p.row.description).await;
+        let note = [dup.clone(), p.unsure.clone()].into_iter().flatten().collect::<Vec<_>>().join(" ");
 
         let txn = Txn {
-            date,
-            name: if r.description.trim().is_empty() { "Transaction".to_string() } else { r.description.trim().to_string() },
-            amount: r.amount.abs(),
-            direction: direction.to_string(),
-            category,
+            date: p.date,
+            name: if p.row.description.trim().is_empty() { "Transaction".to_string() } else { p.row.description.trim().to_string() },
+            amount: p.row.amount.abs(),
+            direction: p.direction.to_string(),
+            category: p.category,
             source: "CSV".into(),
-            key,
-            note: note.clone().unwrap_or_default(),
+            key: p.key,
+            note,
             ..Default::default()
         };
         match global().insert(txn) {
             Ok(_) => {
                 created += 1;
-                if direction == "Transfer" {
+                if p.direction == "Transfer" {
                     transfers += 1;
                 }
-                if note.is_some() {
+                if dup.is_some() {
                     flagged += 1;
+                }
+                if p.unsure.is_some() {
+                    uncertain += 1;
                 }
             }
             Err(e) => tracing::warn!("finance import: failed to create row: {e}"),
@@ -647,7 +720,112 @@ pub async fn import_csv(csv: &str, today: &str, account_hint: &str) -> Result<Im
     if created > 0 {
         crate::charts::refresh();
     }
-    Ok(ImportSummary { created, skipped, transfers, flagged, parsed })
+    Ok(ImportSummary { created, skipped, transfers, flagged, uncertain, parsed })
+}
+
+/// Jev must be this sure of a category to replace the normalizer's label;
+/// below it the row is flagged "category unsure" instead.
+const CATEGORY_MIN_CONFIDENCE: f64 = 0.5;
+
+/// Questions per Jev request: every question is judged independently, but one
+/// request has a token budget, so a long statement goes in chunks.
+const ROWS_PER_REQUEST: usize = 40;
+
+#[derive(Clone)]
+struct TxnAsk {
+    description: String,
+    amount: f64,
+    direction: &'static str,
+}
+
+/// What each category means, for the classifier. Same order as `CATEGORY_LIST`.
+const CATEGORY_HINTS: &[&str] = &[
+    "Supermarkets, grocers, food and household supplies for home",
+    "Restaurants, cafés, bars, takeout and food delivery",
+    "Transit, taxis, ride-hailing, fuel, parking, tolls, car costs",
+    "Rent, mortgage, home insurance, repairs, furnishings",
+    "Electricity, gas, water, internet, phone bills",
+    "Pharmacy, doctors, dentists, therapy, medical and health insurance",
+    "Movies, concerts, games, events, hobbies",
+    "Retail purchases: clothing, electronics, general merchandise, online stores",
+    "Recurring digital or membership subscriptions (streaming, software, gym)",
+    "Flights, hotels, travel bookings, foreign transactions on a trip",
+    "Loan repayments, including student loans",
+    "ATM / bank-machine cash withdrawals (often just an address or ATM code)",
+    "Anything that fits none of the above",
+];
+
+/// The categories a row of this direction may take, with their meanings.
+fn category_options(direction: &str) -> Vec<(String, String)> {
+    match direction {
+        "Income" => vec![
+            ("Salary".into(), "Payroll, wages or direct deposit from an employer".into()),
+            ("Income".into(), "Any other money in: government or tax deposit, interest, an e-transfer received".into()),
+        ],
+        "Transfer" => vec![
+            ("Card payment".into(), "Paying a credit-card bill, seen from either the card or the bank account".into()),
+            ("Savings".into(), "A contribution to savings or investments".into()),
+            ("Transfer in".into(), "Money arriving from another of the user's own accounts".into()),
+            ("Transfer out".into(), "Money leaving to another of the user's own accounts, not a card payment or savings".into()),
+        ],
+        _ => CATEGORY_LIST.iter().zip(CATEGORY_HINTS).map(|(n, h)| (n.to_string(), h.to_string())).collect(),
+    }
+}
+
+/// One Jev choice per row (batched), picking its category within its direction.
+/// Returns one entry per ask; `None` where Jev didn't answer.
+async fn refine_categories(account_hint: &str, asks: &[TxnAsk]) -> Vec<Option<crate::jev::Pick>> {
+    let statement = match account_hint {
+        "credit" => "credit-card statement",
+        "chequing" => "chequing / bank-account statement",
+        _ => "bank or credit-card statement (type unknown)",
+    };
+    let mut out = Vec::with_capacity(asks.len());
+    for chunk in asks.chunks(ROWS_PER_REQUEST) {
+        let questions: Vec<(String, crate::jev::Q)> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let instructions = format!(
+                    "Which category fits this {} transaction from the statement: \"{}\", ${:.2}? Judge by the payee; never infer a category from a street name or address.",
+                    a.direction.to_lowercase(),
+                    a.description.trim(),
+                    a.amount
+                );
+                (format!("row_{i}"), crate::jev::Q::Choice { instructions, options: category_options(a.direction) })
+            })
+            .collect();
+        match crate::jev::ask(json!({ "statement": statement }), questions).await {
+            Ok(answers) => out.extend((0..chunk.len()).map(|i| answers.choice(&format!("row_{i}")))),
+            Err(e) => {
+                tracing::warn!("jev category pass failed: {e}");
+                out.extend(chunk.iter().map(|_| None));
+            }
+        }
+    }
+    out
+}
+
+/// When the file name, caption and header don't say what kind of statement a
+/// CSV is (`detect_account` returned ""), ask Jev. "" when it can't tell.
+pub async fn infer_account(csv: &str) -> &'static str {
+    let head: String = csv.lines().take(12).collect::<Vec<_>>().join("\n");
+    let q = crate::jev::Q::choice(
+        "What kind of account is this CSV statement export from?",
+        [
+            ("credit", "A credit card: purchases as charges, plus 'payment received' / 'thank you' credits"),
+            ("chequing", "A chequing or bank account: payroll deposits, e-transfers, bill payments, debit/credit columns"),
+            ("unclear", "Can't tell from these lines"),
+        ],
+    );
+    match crate::jev::choice(json!(head), q).await {
+        Some(p) if p.confidence >= 0.75 => match p.choice.as_str() {
+            "credit" => "credit",
+            "chequing" => "chequing",
+            _ => "",
+        },
+        _ => "",
+    }
 }
 
 /// A hand-logged transaction: an expense (`/spent`, receipt photo) or income (`/earned`).
@@ -722,7 +900,7 @@ pub async fn log_manual(parsed_json: &str, kind: ManualKind, today: &str) -> Res
     }
 
     let cents = (amount * 100.0).round() as i64;
-    let note = likely_dup_note(&dup_index(&ledger.all()), cents, direction, &date);
+    let note = dup_note_checked(&dup_index(&ledger.all()), cents, direction, &date, &title).await;
 
     ledger.insert(Txn {
         date: date.clone(),
@@ -996,9 +1174,16 @@ mod tests {
 
     #[test]
     fn near_duplicate_is_flagged_within_window() {
-        let prior = vec![(2450, "2026-09-01".to_string(), "Expense".to_string())];
-        assert!(likely_dup_note(&prior, 2450, "Expense", "2026-09-03").is_some());
-        assert!(likely_dup_note(&prior, 2450, "Expense", "2026-09-20").is_none());
-        assert!(likely_dup_note(&prior, 2450, "Income", "2026-09-01").is_none());
+        let prior = vec![(2450, "2026-09-01".to_string(), "Expense".to_string(), "Coffee".to_string())];
+        assert!(likely_dup(&prior, 2450, "Expense", "2026-09-03").is_some());
+        assert!(likely_dup(&prior, 2450, "Expense", "2026-09-20").is_none());
+        assert!(likely_dup(&prior, 2450, "Income", "2026-09-01").is_none());
+    }
+
+    #[test]
+    fn category_options_follow_direction() {
+        assert!(category_options("Expense").iter().any(|(n, _)| n == "Cash"));
+        assert_eq!(category_options("Income").len(), 2);
+        assert_eq!(category_options("Transfer").iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), TRANSFER_KINDS.to_vec());
     }
 }

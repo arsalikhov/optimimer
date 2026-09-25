@@ -286,6 +286,64 @@ async fn execute_node(node: &Node, ctx: &Ctx) -> anyhow::Result<(Value, Vec<Stri
             Ok((json!({ "scheduled": true, "id": id }), vec![]))
         }
 
+        "jev" => {
+            // A typed decision by Jev (never text): `choice` over `options`,
+            // `noul` (yes/no) or `score` over `levels`. Without JEV_API_KEY it
+            // answers `{enabled:false}` instead of failing, so a flow can fall
+            // back to an AI Step's answer.
+            let kind = { let k = field("kind").to_lowercase(); if k.is_empty() { "choice".to_string() } else { k } };
+            let min = ctx.interpolate(&field("min_confidence")).trim().parse::<f64>().unwrap_or(0.6);
+            let raw_state = ctx.interpolate(&field("state"));
+            let state = if raw_state.trim().is_empty() {
+                ctx.input.clone()
+            } else {
+                match serde_json::from_str::<Value>(&raw_state) {
+                    Ok(v @ (Value::Object(_) | Value::Array(_))) => v,
+                    _ => Value::String(raw_state),
+                }
+            };
+            let instructions = ctx.interpolate(&field("instructions"));
+            let q = match kind.as_str() {
+                "noul" => crate::jev::Q::noul(instructions, ctx.interpolate(&field("when_true")), ctx.interpolate(&field("when_false"))),
+                "score" => {
+                    let levels: Vec<String> = ctx.interpolate(&field("levels")).lines().map(|l| l.trim().trim_start_matches(['-', '*']).trim().to_string()).filter(|l| !l.is_empty()).collect();
+                    if !(2..=10).contains(&levels.len()) {
+                        return Err(anyhow::anyhow!("a score needs 2 to 10 levels, one per line (got {})", levels.len()));
+                    }
+                    crate::jev::Q::Score { instructions, levels }
+                }
+                "choice" => {
+                    let options = crate::jev::parse_options(&ctx.interpolate(&field("options")));
+                    if options.len() < 2 {
+                        return Err(anyhow::anyhow!("a choice needs at least 2 options"));
+                    }
+                    crate::jev::Q::Choice { instructions, options }
+                }
+                other => return Err(anyhow::anyhow!("unknown Jev question kind: {other} (use choice, noul or score)")),
+            };
+            if !crate::jev::enabled() {
+                return Ok((json!({ "enabled": false, "answer": "", "confidence": 0.0, "confident": false }), vec![]));
+            }
+            let answers = crate::jev::ask(state, vec![("q".into(), q)]).await?;
+            let out = match kind.as_str() {
+                "noul" => {
+                    let p = answers.noul("q").ok_or_else(|| anyhow::anyhow!("Jev returned no noul answer"))?;
+                    let confidence = p.max(1.0 - p);
+                    json!({ "enabled": true, "answer": p >= 0.5, "probability": p, "confidence": confidence, "confident": confidence >= min })
+                }
+                "score" => {
+                    let (score, confidence) = answers.score("q").ok_or_else(|| anyhow::anyhow!("Jev returned no score answer"))?;
+                    json!({ "enabled": true, "answer": score, "confidence": confidence, "confident": confidence >= min })
+                }
+                _ => {
+                    let pick = answers.choice("q").ok_or_else(|| anyhow::anyhow!("Jev returned no choice answer"))?;
+                    let probabilities: serde_json::Map<String, Value> = pick.probabilities.iter().map(|(o, p)| (o.clone(), json!(p))).collect();
+                    json!({ "enabled": true, "answer": pick.choice, "confidence": pick.confidence, "confident": pick.confidence >= min, "probabilities": probabilities })
+                }
+            };
+            Ok((out, vec![]))
+        }
+
         "output" => {
             // Echoes its interpolated value; the visible "result" of a run.
             let value = ctx.interpolate(&field("value"));
@@ -318,4 +376,38 @@ fn parse_json_loose(text: &str) -> Value {
         }
     }
     Value::Null
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flow(jev_data: Value) -> Workflow {
+        serde_json::from_value(json!({
+            "id": "t", "name": "t",
+            "nodes": [
+                { "id": "trigger_1", "type": "trigger", "position": { "x": 0, "y": 0 }, "data": {} },
+                { "id": "pick", "type": "jev", "position": { "x": 0, "y": 0 }, "data": jev_data }
+            ],
+            "edges": [{ "id": "e1", "source": "trigger_1", "target": "pick" }]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn jev_node_degrades_without_a_key_and_validates_its_question() {
+        if crate::jev::enabled() {
+            return; // a developer's real key in the env; nothing to assert offline
+        }
+        let ok = run(&flow(json!({ "kind": "choice", "instructions": "Which?", "options": "{{input.categories}}" })), json!({ "categories": "- Work: job\n- Home" })).await;
+        let r = ok.results.iter().find(|r| r.node_id == "pick").unwrap();
+        assert_eq!(r.status, "ok");
+        assert_eq!(r.output["enabled"], false);
+        assert_eq!(r.output["confident"], false);
+
+        let bad = run(&flow(json!({ "kind": "choice", "instructions": "Which?", "options": "only-one" })), json!({})).await;
+        assert_eq!(bad.status, "error", "a one-option choice is a flow bug, reported even without a key");
+        let bad = run(&flow(json!({ "kind": "score", "instructions": "How?", "levels": "low" })), json!({})).await;
+        assert_eq!(bad.status, "error");
+    }
 }

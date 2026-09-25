@@ -306,6 +306,20 @@ pub fn attach_note(chat_id: i64, text: &str) -> NoteAttach {
     NoteAttach::Queued
 }
 
+/// When the chat's batch is parked waiting for its comment (and the wait hasn't
+/// expired), a short preview of it — what it is and its first lines — so the
+/// router can check the next message is really about it. `None` otherwise.
+pub fn awaiting_note_preview(chat_id: i64) -> Option<String> {
+    let map = batches().lock().unwrap_or_else(|e| e.into_inner());
+    let b = map.get(&chat_id)?;
+    let expired = b.touched.map(|t| t.elapsed() > note_ttl()).unwrap_or(true);
+    if !b.awaiting_note || expired || b.items.is_empty() {
+        return None;
+    }
+    let lines = b.items.iter().take(6).map(|it| format!("{}: {}", it.author, it.text.chars().take(200).collect::<String>())).collect::<Vec<_>>().join("\n");
+    Some(format!("{}\n{lines}", b.describe()))
+}
+
 /// Remove and return the chat's parked batch (for the Summarize/Discard buttons).
 pub fn take(chat_id: i64) -> Option<ForwardBatch> {
     let mut map = batches().lock().unwrap_or_else(|e| e.into_inner());

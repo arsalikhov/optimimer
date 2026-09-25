@@ -29,6 +29,10 @@ pub struct Watch {
     pub last_status: String,
     #[serde(default)]
     pub done: bool,
+    /// Hash of the page text at the last out-of-stock verdict: an unchanged
+    /// page keeps its verdict without asking the classifier again.
+    #[serde(default)]
+    pub page_hash: String,
 }
 
 /// SQLite-backed watch store (table `stock_watches`), mirroring `Scheduler`.
@@ -147,11 +151,11 @@ pub async fn run_worker(shopper: Shopper) {
     }
 }
 
-/// One check: fetch the page, ask the LLM whether it's purchasable, persist the
+/// One check: fetch the page, judge whether it's purchasable, persist the
 /// outcome, and notify + finish the watch when it's back in stock.
 async fn check_watch(client: &reqwest::Client, token: &str, shopper: &Shopper, watch: &mut Watch) {
     watch.last_checked = Utc::now().to_rfc3339();
-    match check_stock(client, &watch.url).await {
+    match check_stock(client, &watch.url, &watch.page_hash).await {
         Ok(check) => {
             if !check.product.is_empty() {
                 watch.product = check.product;
@@ -163,7 +167,8 @@ async fn check_watch(client: &reqwest::Client, token: &str, shopper: &Shopper, w
                 notify(client, token, watch.chat_id, &format!("🛍️ Back in stock: {name}\n{}", watch.url)).await;
                 tracing::info!("stock watch {} hit: {}", watch.id, watch.url);
             } else {
-                watch.last_status = "out of stock".into();
+                watch.last_status = check.status;
+                watch.page_hash = check.page_hash;
             }
         }
         Err(e) => {
@@ -179,12 +184,20 @@ async fn check_watch(client: &reqwest::Client, token: &str, shopper: &Shopper, w
 struct StockCheck {
     in_stock: bool,
     product: String,
+    /// Human-readable verdict when not in stock ("out of stock", "pre-order", …).
+    status: String,
+    page_hash: String,
 }
 
-/// Fetch a product page and have the LLM judge availability from its visible
-/// text. Uncertainty counts as out of stock so the watch keeps running — a
-/// false "in stock" ping is worse than checking again in an hour.
-async fn check_stock(client: &reqwest::Client, url: &str) -> anyhow::Result<StockCheck> {
+/// Jev must be this sure a page is purchasable before we ping — a false "back
+/// in stock" is worse than checking again in an hour.
+const IN_STOCK_MIN_CONFIDENCE: f64 = 0.8;
+
+/// Fetch a product page and judge availability from its visible text (Jev when
+/// configured, else the shopper LLM). Uncertainty counts as out of stock so the
+/// watch keeps running. A page whose text hashes the same as at the last
+/// out-of-stock verdict is not re-judged.
+async fn check_stock(client: &reqwest::Client, url: &str, last_hash: &str) -> anyhow::Result<StockCheck> {
     let html = client
         .get(url)
         // A browser-ish UA: plenty of shops serve bot UAs an empty shell.
@@ -201,6 +214,39 @@ async fn check_stock(client: &reqwest::Client, url: &str) -> anyhow::Result<Stoc
         .await?;
 
     let text = page_text(&html, 12_000);
+    let page_hash = text_hash(&text);
+    if !last_hash.is_empty() && page_hash == last_hash {
+        return Ok(StockCheck { in_stock: false, product: String::new(), status: "out of stock (page unchanged)".into(), page_hash });
+    }
+
+    if crate::jev::enabled() {
+        let q = crate::jev::Q::choice(
+            "Judging only from this product page's visible text, can the product be bought right now?",
+            [
+                ("in_stock", "Purchasable now: an enabled add-to-cart/buy button, 'in stock', or a delivery date"),
+                ("out_of_stock", "'Out of stock', 'sold out', 'unavailable', 'notify me when available', or a disabled buy button"),
+                ("preorder", "Only available to pre-order or backorder, not shipping now"),
+                ("not_a_product_page", "Not a single product's page (a search, a category, an error, a login or captcha wall)"),
+                ("unclear", "The text doesn't say either way"),
+            ],
+        );
+        let state = json!({ "url": url, "page_text": text });
+        if let Some(pick) = crate::jev::choice(state, q).await {
+            tracing::info!("stock check {url}: {}", pick.top(2));
+            let in_stock = pick.confident(IN_STOCK_MIN_CONFIDENCE) == Some("in_stock");
+            let status = match pick.choice.as_str() {
+                "in_stock" => "possibly in stock (not sure enough to ping)",
+                "preorder" => "pre-order only",
+                "not_a_product_page" => "not a product page — check the link",
+                "unclear" => "unclear",
+                _ => "out of stock",
+            };
+            // Jev doesn't write text: the product name comes from the page's own title.
+            return Ok(StockCheck { in_stock, product: page_title(&html), status: status.into(), page_hash });
+        }
+        // Jev failed: fall through to the LLM.
+    }
+
     let model = crate::llm::shopper();
     let system = "You judge whether a product page shows the product as purchasable RIGHT NOW. \
                   Signals for in stock: an enabled add-to-cart/buy button, 'in stock', a deliverable date. \
@@ -215,7 +261,42 @@ async fn check_stock(client: &reqwest::Client, url: &str) -> anyhow::Result<Stoc
     Ok(StockCheck {
         in_stock: parsed["in_stock"].as_bool().unwrap_or(false),
         product: parsed["product"].as_str().unwrap_or("").trim().to_string(),
+        status: "out of stock".into(),
+        page_hash,
     })
+}
+
+fn text_hash(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// The product name a shop gives its own page: `og:title`, else `<title>`, with
+/// a trailing " | Shop name" / " - Shop name" dropped.
+pub(crate) fn page_title(html: &str) -> String {
+    let lower = html.to_lowercase();
+    let og = lower.find("property=\"og:title\"").or_else(|| lower.find("property='og:title'")).and_then(|at| {
+        let tag_start = lower[..at].rfind('<')?;
+        let tag_end = at + lower[at..].find('>')?;
+        let tag = &html[tag_start..tag_end];
+        let c = tag.to_lowercase().find("content=")? + "content=".len();
+        let quote = tag[c..].chars().next()?;
+        let rest = &tag[c + 1..];
+        Some(rest[..rest.find(quote)?].to_string())
+    });
+    let title = og.or_else(|| {
+        let s = lower.find("<title")?;
+        let s = s + lower[s..].find('>')? + 1;
+        let e = s + lower[s..].find("</title>")?;
+        Some(html[s..e].to_string())
+    });
+    let t = title.unwrap_or_default();
+    let t = t.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"");
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = [" | ", " – ", " - ", " — "].iter().fold(t.clone(), |acc, sep| match acc.rsplit_once(sep) { Some((head, _)) if !head.is_empty() => head.to_string(), _ => acc });
+    t.chars().take(120).collect()
 }
 
 /// Crude HTML → visible text: drop script/style bodies, strip tags, collapse
@@ -335,6 +416,14 @@ mod tests {
     }
 
     #[test]
+    fn page_title_prefers_og_and_drops_shop_suffix() {
+        let html = r#"<head><title>Ignored | Shop</title><meta property="og:title" content="Widget Pro 2 &amp; Case"></head>"#;
+        assert_eq!(page_title(html), "Widget Pro 2 & Case");
+        assert_eq!(page_title("<title>\n Widget Pro - Big Shop </title>"), "Widget Pro");
+        assert_eq!(page_title("<p>no title</p>"), "");
+    }
+
+    #[test]
     fn add_list_remove_roundtrip() {
         let shopper = Shopper { db: Db::memory().unwrap() };
         let id = shopper.add(Watch {
@@ -346,6 +435,7 @@ mod tests {
             last_checked: String::new(),
             last_status: String::new(),
             done: false,
+            ..Default::default()
         });
         assert_eq!(shopper.active(7).len(), 1);
         assert_eq!(shopper.active(8).len(), 0);

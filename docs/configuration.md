@@ -89,6 +89,32 @@ OpenRouter; when one disappears the bot says so and you can pin another.
 | `TRANSCRIBE_MODEL` | tier default | Voice transcription (needs audio input). |
 | `SHOPPER_MODEL` | tier default | Reads product pages for stock watches. |
 
+## Decisions (Jev, optional)
+
+[Jev](https://typesafe.ai) is TypeSafe AI's decision model: it never writes text, it answers typed questions (yes/no,
+one of N options, a level on a rubric) with calibrated probabilities. With a key, the decisions below go to Jev and
+only act when it is confident; without one, each falls back to the LLM prompt or keyword rule it had before.
+
+- `/complete`: which open task you meant, with "none of these". When unsure it lists the candidates instead of
+  ticking the first one.
+- Stock watches: in stock, out of stock, pre-order, not a product page, or unclear. The product name comes from the
+  page title, and a page whose text hasn't changed since the last check isn't judged again.
+- CSV import: account type when the file doesn't say, the category of every row within its direction (low-confidence
+  rows are tagged "category unsure" in their note), and whether a same-amount neighbour is really the same payment.
+- `/todo`, `/note`, `/spent`, `/earned`: a Jev Decision block in each `cmd-*` agent double-checks the category.
+- Chat: "forget this conversation" or "switch to Opus" however it's phrased; a hard request starts on the strong or
+  max rung; a short voice note that is a thought-dump is kept as a memo; a message sent while forwards wait for a
+  comment goes to the agent instead when it's plainly unrelated.
+- Memory: a new name that is an existing entity under another name ("Sam" and "Sam Smith") is merged, and entity
+  kinds are double-checked. Shopping-list items are re-checked grocery or not.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `JEV_API_KEY` | unset | Key from console.typesafe.ai. Unset: every decision uses its previous path. |
+| `JEV_MODEL` | `jev-latest` | Pin a versioned id (e.g. `jev-1.13.0`) so thresholds don't drift when the alias moves. |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | API root, for a proxy or gateway. |
+| `JEV_TRIAGE` | on | `off` stops the per-message chat triage (control phrasing, starting rung), which adds one Jev call per text message. |
+
 ## Behaviour
 
 | Variable | Default | Purpose |

@@ -41,6 +41,7 @@ mod notes;
 mod onboarding;
 mod prefs;
 mod summaries;
+mod triage;
 mod watch;
 mod workflows;
 
@@ -55,6 +56,7 @@ use notes::*;
 use onboarding::*;
 use prefs::*;
 use summaries::*;
+use triage::*;
 use watch::*;
 use workflows::*;
 pub use prefs::migrate_json;
@@ -311,13 +313,21 @@ pub async fn run_bot(store: Store, db: Db) {
             // A plain message may be the comment on a forward batch — one that is
             // open (still collecting, or parked waiting for exactly this note) …
             if !text.starts_with('/') {
-                match convo::attach_note(chat_id, &text) {
-                    convo::NoteAttach::Ready(batch) => {
-                        finalize_forward_batch(&client, &api, &state, chat_id, batch).await;
-                        continue;
+                // A batch parked for its comment takes the next message as that
+                // comment — unless Jev says it's plainly a new, unrelated request.
+                let unrelated = match convo::awaiting_note_preview(chat_id) {
+                    Some(preview) => unrelated_to_forward(&preview, &text).await,
+                    None => false,
+                };
+                if !unrelated {
+                    match convo::attach_note(chat_id, &text) {
+                        convo::NoteAttach::Ready(batch) => {
+                            finalize_forward_batch(&client, &api, &state, chat_id, batch).await;
+                            continue;
+                        }
+                        convo::NoteAttach::Queued => continue,
+                        convo::NoteAttach::None => {}
                     }
-                    convo::NoteAttach::Queued => continue,
-                    convo::NoteAttach::None => {}
                 }
                 // … or one about to arrive. Telegram sends the comment first, so
                 // peek briefly for forwards from this chat before routing the text.
@@ -352,27 +362,13 @@ pub async fn run_bot(store: Store, db: Db) {
             // "clear context" / "new chat": handled here, deterministically, so it
             // works even when the model is slow or down.
             if is_clear_request(&text) {
-                state.pending.lock().unwrap().remove(&chat_id);
-                let n = crate::memory::global().clear_context(chat_id);
-                send(&client, &api, chat_id, &Reply::text(format!(
-                    "Fresh start — I've set aside this conversation ({n} turns). Long-term memory, tasks, notes and money are untouched."
-                ))).await;
+                send(&client, &api, chat_id, &clear_chat(&state, chat_id)).await;
                 continue;
             }
             // "escalate to unsafe" / "use opus" / "back to normal": pin this chat
             // to a rung, in code, so the everyday model can't second-guess it.
             if let Some(route) = route_request(&text) {
-                let reply = if route == Some("unsafe") && !state.is_owner(chat_id) {
-                    "Only the owner can route a chat to the unsafe model.".to_string()
-                } else {
-                    crate::llm::set_route(chat_id, route);
-                    let (model, _) = crate::llm::model_for_route(route);
-                    match route {
-                        Some(r) => format!("Routing this chat to {model} ({r}) until you say \"back to normal\"."),
-                        None => format!("Back to normal — {model}."),
-                    }
-                };
-                send(&client, &api, chat_id, &Reply::text(reply)).await;
+                send(&client, &api, chat_id, &Reply::text(apply_route(&state, chat_id, route))).await;
                 continue;
             }
             // "unsafe: <message>" — one message on the low-guardrail model, no mode change.
@@ -389,11 +385,44 @@ pub async fn run_bot(store: Store, db: Db) {
             let (client, api, state) = (client.clone(), api.clone(), state.clone());
             tokio::spawn(async move {
                 let _turn = state.turn_lock(chat_id).lock_owned().await;
+                // Jev triage: a control request the keywords missed, or a hard
+                // request that should start on a stronger rung.
+                let mut once = once;
+                if once.is_none() {
+                    let t = triage(&text).await;
+                    match t.control {
+                        Some(Control::Clear) => return send(&client, &api, chat_id, &clear_chat(&state, chat_id)).await,
+                        Some(Control::Route(route)) => return send(&client, &api, chat_id, &Reply::text(apply_route(&state, chat_id, route))).await,
+                        None => once = start_rung(t.rung, crate::llm::route(chat_id).as_deref()),
+                    }
+                }
                 if let Some(reply) = run_agent_routed(&client, &api, &state, chat_id, &text, once).await {
                     send(&client, &api, chat_id, &reply).await;
                 }
             });
         }
+    }
+}
+
+/// Set the conversation aside (long-term memory, vault and ledger untouched).
+fn clear_chat(state: &BotState, chat_id: i64) -> Reply {
+    state.pending.lock().unwrap().remove(&chat_id);
+    let n = crate::memory::global().clear_context(chat_id);
+    Reply::text(format!(
+        "Fresh start — I've set aside this conversation ({n} turns). Long-term memory, tasks, notes and money are untouched."
+    ))
+}
+
+/// Pin the chat to a rung (`Some`) or back to normal (`None`); the reply text.
+fn apply_route(state: &BotState, chat_id: i64, route: Option<&str>) -> String {
+    if route == Some("unsafe") && !state.is_owner(chat_id) {
+        return "Only the owner can route a chat to the unsafe model.".to_string();
+    }
+    crate::llm::set_route(chat_id, route);
+    let (model, _) = crate::llm::model_for_route(route);
+    match route {
+        Some(r) => format!("Routing this chat to {model} ({r}) until you say \"back to normal\"."),
+        None => format!("Back to normal — {model}."),
     }
 }
 
