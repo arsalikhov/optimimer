@@ -473,7 +473,11 @@ pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, record
             continue;
         }
         let kind = if KINDS.contains(&kind.as_str()) { kind } else { "topic".to_string() };
-        let node = m.upsert_node(&kind, name, e["summary"].as_str().unwrap_or(""), "");
+        let summary = e["summary"].as_str().unwrap_or("");
+        // A name the graph doesn't know yet may still be someone it does
+        // ("Sam" vs "Sam Smith"): Jev decides, and double-checks the kind.
+        let (canonical, kind) = if m.by_name(name).is_none() { resolve_entity(&m, name, &kind, summary, user_text).await } else { (name.to_string(), kind) };
+        let node = m.upsert_node(&kind, &canonical, summary, "");
         ids.insert(norm(name), node.id.clone());
         let _ = crate::vault::mirror_memory_node(&node, &m.neighbors(&node.id, 12));
     }
@@ -491,6 +495,72 @@ pub async fn extract(chat_id: i64, user_text: &str, assistant_text: &str, record
             }
         }
     }
+}
+
+/// What each entity kind means, for Jev. Same order as `KINDS`.
+const KIND_HINTS: &[&str] = &[
+    "A person: a friend, relative, colleague, professional",
+    "A company, institution, team or other organization",
+    "A project: a bounded piece of work or goal the user is pursuing",
+    "A place: a city, venue, address, region",
+    "A recurring subject or interest",
+    "Something the user likes, dislikes or wants done a certain way",
+    "A durable fact about the user's life",
+    "Something that happens at a particular time",
+];
+
+/// Jev must be this sure two names are one entity before they're merged.
+const SAME_ENTITY_MIN: f64 = 0.85;
+/// …and this sure of a different kind than the extractor chose.
+const KIND_MIN: f64 = 0.8;
+
+/// For an entity name not yet in the graph: the existing node's name if Jev
+/// judges it the same entity under another name, else the name as given; and
+/// the kind, re-picked by Jev when it is confident. Unchanged when Jev is off.
+async fn resolve_entity(m: &Memory, name: &str, kind: &str, summary: &str, context: &str) -> (String, String) {
+    let fallback = (name.to_string(), kind.to_string());
+    if !crate::jev::enabled() {
+        return fallback;
+    }
+    let candidates: Vec<Node> = m.search(name, 8).into_iter().filter(|n| n.kind != "category" && norm(&n.name) != norm(name)).take(5).collect();
+    let mut questions = vec![(
+        "kind".to_string(),
+        crate::jev::Q::choice(
+            format!("What kind of thing is \"{name}\" in the user's personal knowledge graph?"),
+            KINDS.iter().zip(KIND_HINTS).map(|(k, h)| (k.to_string(), h.to_string())),
+        ),
+    )];
+    for (i, c) in candidates.iter().enumerate() {
+        questions.push((
+            format!("same_{i}"),
+            crate::jev::Q::noul(
+                format!(
+                    "Is \"{name}\" (described as: {summary}) the same {kind} as the already-known \"{}\" ({}: {})?",
+                    c.name, c.kind, c.summary
+                ),
+                "The same real-world entity, just named differently (a first name, a nickname, an abbreviation)",
+                "Different entities that merely share a word",
+            ),
+        ));
+    }
+    let answers = match crate::jev::ask(serde_json::json!({ "conversation": truncate(context, 1500) }), questions).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("jev entity resolution failed: {e}");
+            return fallback;
+        }
+    };
+    let best = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| answers.noul(&format!("same_{i}")).map(|p| (p, c)))
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some((p, c)) = best.filter(|(p, _)| *p >= SAME_ENTITY_MIN) {
+        tracing::info!("memory: '{name}' is '{}' (jev {p:.2})", c.name);
+        return (c.name.clone(), c.kind.clone());
+    }
+    let kind = answers.choice("kind").and_then(|p| p.confident(KIND_MIN).map(str::to_string)).unwrap_or(fallback.1);
+    (fallback.0, kind)
 }
 
 /// Fold turns older than the verbatim window into the rolling summary once

@@ -19,6 +19,19 @@
       }
     },
     {
+      "id": "jev_category",
+      "type": "jev",
+      "position": { "x": 320, "y": 380 },
+      "data": {
+        "label": "Pick category (Jev)",
+        "kind": "choice",
+        "state": "{{input.text}}",
+        "instructions": "Which spending category fits this expense? Judge by what was bought and from whom; never infer a category from a street name or address.",
+        "options": "Groceries: supermarkets, grocers, food and household supplies for home\nDining: restaurants, cafés, bars, takeout, food delivery\nTransport: transit, taxis, ride-hailing, fuel, parking, car costs\nHousing: rent, mortgage, home insurance, repairs, furnishings\nUtilities: electricity, gas, water, internet, phone bills\nHealth: pharmacy, doctors, dentists, therapy, health insurance\nEntertainment: movies, concerts, games, events, hobbies\nShopping: clothing, electronics, general merchandise, online stores\nSubscriptions: recurring streaming, software or membership fees\nTravel: flights, hotels, travel bookings\nLoans: loan repayments, including student loans\nCash: ATM cash withdrawals\nOther: anything that fits none of the above",
+        "min_confidence": "0.6"
+      }
+    },
+    {
       "id": "out",
       "type": "output",
       "position": { "x": 640, "y": 200 },
@@ -27,6 +40,7 @@
   ],
   "edges": [
     { "id": "e1", "source": "trigger_1", "target": "parse" },
-    { "id": "e2", "source": "parse", "target": "out" }
+    { "id": "e2", "source": "parse", "target": "out" },
+    { "id": "e_jev", "source": "trigger_1", "target": "jev_category" }
   ]
 }

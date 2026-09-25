@@ -12,6 +12,7 @@
   // A short, type-specific subtitle so nodes are readable at a glance.
   const subtitle = $derived.by(() => {
     if (kind === 'llm') return (data?.model as string) ?? '';
+    if (kind === 'jev') return `${data?.kind ?? 'choice'}: ${(data?.instructions as string) ?? ''}`;
     if (kind === 'http') return `${data?.method ?? 'GET'} ${(data?.url as string) ?? ''}`;
     if (kind === 'condition') return `${data?.left ?? ''} ${data?.op ?? ''} ${data?.right ?? ''}`;
     return def.hint;

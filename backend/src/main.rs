@@ -5,6 +5,7 @@ mod datetime;
 mod db;
 mod engine;
 mod finance;
+mod jev;
 mod llm;
 mod memory;
 mod models;

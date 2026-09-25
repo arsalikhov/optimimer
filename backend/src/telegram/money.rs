@@ -24,7 +24,17 @@ pub(super) async fn handle_money(state: &BotState, chat_id: i64, cmd: &str, body
         "command": cmd,
     });
     let result = engine::run(&wf, input).await;
-    let parsed = output_text(&result).unwrap_or_default();
+    let mut parsed = output_text(&result).unwrap_or_default();
+    // A confident Jev category pick overrules the parser's.
+    if let Some(category) = jev_category(&result) {
+        let cleaned = parsed.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+        if let Ok(mut v) = serde_json::from_str::<Value>(cleaned) {
+            if v.is_object() {
+                v["category"] = json!(category);
+                parsed = v.to_string();
+            }
+        }
+    }
     let kind = if cmd == "earned" {
         crate::finance::ManualKind::Earned
     } else {

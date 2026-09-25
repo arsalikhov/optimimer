@@ -92,15 +92,16 @@ pub(super) async fn handle_buy_later(state: &BotState, chat_id: i64, body: &str)
 }
 
 /// Ask a cheap model to split `text` into individual items and sort them into
-/// (groceries, other). Falls back to treating the whole input as one grocery
-/// line if the model is unavailable or returns something unparseable.
+/// (groceries, other); with Jev on, each item's side is then double-checked.
+/// Falls back to a plain comma split (all groceries) if the model is
+/// unavailable or returns something unparseable.
 pub(super) async fn classify_items(text: &str) -> (Vec<String>, Vec<String>) {
     let system = "Split the shopping input into individual items and classify each as a grocery \
         (food, drinks, produce, pantry staples, and household consumables like paper towels, dish \
         soap, toilet paper) or other (anything non-grocery: electronics, clothing, tools, gifts, \
         furniture, etc.). Output ONLY minified JSON: {\"groceries\":[...],\"other\":[...]}. Each item \
         a short lowercase phrase. No prose, no code fences.";
-    let raw = crate::openrouter::chat("anthropic/claude-haiku-4.5", system, text)
+    let raw = crate::openrouter::chat(&crate::llm::parser(), system, text)
         .await
         .unwrap_or_default();
     let trimmed = raw
@@ -109,15 +110,52 @@ pub(super) async fn classify_items(text: &str) -> (Vec<String>, Vec<String>) {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-        let g = str_vec(&v["groceries"]);
-        let o = str_vec(&v["other"]);
-        if !g.is_empty() || !o.is_empty() {
-            return (g, o);
-        }
+    let (g, o) = match serde_json::from_str::<Value>(trimmed) {
+        Ok(v) if !str_vec(&v["groceries"]).is_empty() || !str_vec(&v["other"]).is_empty() => (str_vec(&v["groceries"]), str_vec(&v["other"])),
+        // Couldn't classify — keep the items rather than dropping them.
+        _ => (text.split([',', ';', '\n']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(), vec![]),
+    };
+    recheck_items(g, o).await
+}
+
+/// Jev's grocery-or-not verdict per item, all in one request; a confident
+/// answer moves an item to the other list. Unchanged when Jev is off.
+async fn recheck_items(groceries: Vec<String>, other: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let items: Vec<String> = groceries.iter().chain(other.iter()).cloned().collect();
+    if !crate::jev::enabled() || items.is_empty() || items.len() > 60 {
+        return (groceries, other);
     }
-    // Couldn't classify — keep the item rather than dropping it.
-    (vec![text.trim().to_string()], vec![])
+    let questions = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let q = crate::jev::Q::noul(
+                format!("Is \"{item}\" a grocery item?"),
+                "Groceries: food, drinks, produce, pantry staples, and household consumables like paper towels, dish soap, toilet paper",
+                "Not a grocery: electronics, clothing, tools, gifts, furniture and other goods",
+            );
+            (format!("item_{i}"), q)
+        })
+        .collect();
+    let answers = match crate::jev::ask(json!("A shopping list, sorted into a grocery list and a list of other things to buy."), questions).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("jev list check failed: {e}");
+            return (groceries, other);
+        }
+    };
+    let n_groceries = groceries.len();
+    let (mut g, mut o) = (Vec::new(), Vec::new());
+    for (i, item) in items.into_iter().enumerate() {
+        let was_grocery = i < n_groceries;
+        let is_grocery = match answers.noul(&format!("item_{i}")) {
+            Some(p) if p >= 0.8 => true,
+            Some(p) if p <= 0.2 => false,
+            _ => was_grocery,
+        };
+        if is_grocery { g.push(item) } else { o.push(item) }
+    }
+    (g, o)
 }
 
 pub(super) fn str_vec(v: &Value) -> Vec<String> {

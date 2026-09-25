@@ -1,6 +1,6 @@
 import type { Node, Edge } from '@xyflow/svelte';
 
-export type NodeKind = 'trigger' | 'llm' | 'http' | 'condition' | 'datetime' | 'schedule' | 'output';
+export type NodeKind = 'trigger' | 'llm' | 'jev' | 'http' | 'condition' | 'datetime' | 'schedule' | 'output';
 
 export interface Workflow {
   id: string;
@@ -83,6 +83,35 @@ export const NODE_DEFS: Record<NodeKind, NodeDef> = {
       },
       { key: 'system', label: 'System prompt', type: 'textarea' },
       { key: 'prompt', label: 'Prompt', type: 'textarea', placeholder: 'Use {{input}} or {{nodeId.text}}' }
+    ]
+  },
+  jev: {
+    kind: 'jev',
+    label: 'Jev Decision',
+    icon: '🎯',
+    color: '#ec4899',
+    hint: 'A typed decision by Jev — never text. choice picks one of the options, noul answers yes/no, score rates on the levels. Outputs {{id.answer}}, {{id.confidence}}, {{id.confident}}; without JEV_API_KEY it outputs {{id.enabled}} = false.',
+    defaults: {
+      label: 'Jev Decision',
+      kind: 'choice',
+      state: '{{input.text}}',
+      instructions: 'Which category fits this?',
+      options: 'Work: my job\nHome: chores and errands\nOther: anything else',
+      levels: '',
+      when_true: '',
+      when_false: '',
+      min_confidence: '0.6'
+    },
+    fields: [
+      { key: 'label', label: 'Name', type: 'text' },
+      { key: 'kind', label: 'Question type', type: 'select', options: ['choice', 'noul', 'score'] },
+      { key: 'state', label: 'What to judge (text or JSON)', type: 'textarea', placeholder: '{{input.text}}' },
+      { key: 'instructions', label: 'Question', type: 'textarea' },
+      { key: 'options', label: 'Choice options — one per line, "name: meaning" (include a way out like "other")', type: 'textarea', placeholder: '{{input.categories}}' },
+      { key: 'levels', label: 'Score levels — one per line, lowest first (2–10)', type: 'textarea' },
+      { key: 'when_true', label: 'Noul: what yes means (optional)', type: 'text' },
+      { key: 'when_false', label: 'Noul: what no means (optional)', type: 'text' },
+      { key: 'min_confidence', label: 'Confident at or above', type: 'text', placeholder: '0.6' }
     ]
   },
   http: {

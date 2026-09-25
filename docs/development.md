@@ -12,6 +12,7 @@ backend/            Rust (axum + tokio + rusqlite) — the whole product
   src/memory.rs       conversation store + knowledge graph + recall
   src/vault.rs        Markdown files, Bases, starter files
   src/finance.rs      ledger, CSV import, dedup;  charts.rs renders Charts.md / Gantt.md
+  src/jev.rs          optional Jev client: typed noul/choice/score decisions (telegram/triage.rs uses it per message)
   src/engine.rs       graph execution engine for the workflow agents
   agents/             bundled cmd-*.json parsers (todo, note, spent, earned, notify, email)
   assets/             starter .base files and Home.md
@@ -86,7 +87,8 @@ The release workflow cross-compiles static binaries for arm64 and amd64, builds 
 Besides the conversational agent, a handful of small **workflow agents** (`backend/agents/cmd-*.json`) turn free
 text into structured JSON: `cmd-todo`, `cmd-note`, `cmd-spent`, `cmd-earned`, and the two that act, `cmd-notify`
 (reminders) and `cmd-email`. They run on the graph engine and can be edited in the web UI. Blocks: Trigger, AI Step
-(OpenRouter), HTTP, Condition, Schedule, Output; any string field supports `{{input}}`, `{{input.field}}`,
+(OpenRouter), Jev Decision (a typed choice / noul / score; `{enabled:false}` without `JEV_API_KEY`), HTTP, Condition,
+Schedule, Output; any string field supports `{{input}}`, `{{input.field}}`,
 `{{nodeId}}`, `{{nodeId.field}}`. On start the bundled files are re-seeded, so a deleted agent comes back.
 
 ## HTTP API

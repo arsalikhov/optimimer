@@ -17,6 +17,14 @@ fn node_output(result: &RunResponse, id: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// The category a flow's `jev_category` node picked — only when Jev was on
+/// and at least as sure as the node's `min_confidence`. Callers prefer it over
+/// the AI Step's pick, which it double-checks.
+pub(super) fn jev_category(result: &RunResponse) -> Option<String> {
+    let out = node_output(result, "jev_category");
+    (out["confident"] == Value::Bool(true)).then(|| s(&out["answer"])).filter(|c| !c.is_empty())
+}
+
 fn s(v: &Value) -> String {
     v.as_str().unwrap_or("").trim().to_string()
 }
@@ -57,9 +65,15 @@ pub(super) async fn handle_todo(state: &BotState, chat_id: i64, body: &str) -> R
     let kind = s(&parsed["kind"]).to_lowercase();
     let start = s(&dt["rfc3339"]);
     let end = s(&dt["rfc3339_end"]);
+    // A project was chosen under the parser's category, so only overrule the
+    // category of a task that has none.
+    let category = match jev_category(&result) {
+        Some(c) if s(&parsed["project"]).is_empty() => c,
+        _ => s(&parsed["category"]),
+    };
     let task = vault::NewTask {
         title: title.clone(),
-        category: s(&parsed["category"]),
+        category,
         priority: s(&parsed["priority"]).to_lowercase(),
         status: s(&parsed["status"]).to_lowercase(),
         due: vault::local_iso(&start),
@@ -129,7 +143,7 @@ pub(super) async fn handle_note(state: &BotState, chat_id: i64, body: &str) -> R
     let title = { let t = s(&parsed["title"]); if t.is_empty() { first_words(body, 8) } else { t } };
     let note = vault::NewNote {
         title: title.clone(),
-        category: s(&parsed["category"]),
+        category: jev_category(&result).unwrap_or_else(|| s(&parsed["category"])),
         tags: parsed["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str()).map(str::to_string).collect()).unwrap_or_default(),
         status: s(&parsed["status"]),
         body: body.trim().to_string(),
@@ -155,20 +169,24 @@ fn first_words(s: &str, n: usize) -> String {
 }
 
 /// `/complete <what>` — tick the matching open task (`status: done`). With
-/// several candidates a small model picks the one meant.
+/// several candidates (or with Jev on, even one — the title match is loose) a
+/// picker decides which was meant; when it can't tell, nothing is ticked and
+/// the candidates are listed so the user (or the agent) can be specific.
 pub(super) async fn handle_complete(_state: &BotState, _chat_id: i64, body: &str) -> Reply {
     if body.trim().is_empty() {
         return Reply::text("Usage: `/complete <task>`");
     }
     let mut candidates = vault::find_open_tasks(body);
-    let mut doc = match candidates.len() {
+    let picked = match candidates.len() {
         0 => return Reply::text(format!("Couldn't find an open task matching '{}'.", body.trim())),
-        1 => candidates.remove(0),
-        _ => {
-            let idx = pick_candidate(body, &candidates).await;
-            candidates.remove(idx)
-        }
+        1 if !crate::jev::enabled() => Some(0),
+        _ => pick_candidate(body, &candidates).await,
     };
+    let Some(idx) = picked else {
+        let list = candidates.iter().take(10).enumerate().map(|(i, d)| format!("{}. {}", i + 1, md_escape(&d.title()))).collect::<Vec<_>>().join("\n");
+        return Reply::text(format!("Not sure which task you mean by '{}' — nothing marked done. Open tasks that look close:\n{list}", body.trim()));
+    };
+    let mut doc = candidates.remove(idx);
     let title = doc.title();
     match vault::complete(&mut doc) {
         Ok(()) => {
@@ -179,24 +197,44 @@ pub(super) async fn handle_complete(_state: &BotState, _chat_id: i64, body: &str
     }
 }
 
-/// Which of several open tasks did the user mean? Returns an index into `docs`.
-async fn pick_candidate(query: &str, docs: &[Doc]) -> usize {
+/// Jev must be at least this sure before a task is ticked on its word.
+const PICK_MIN_CONFIDENCE: f64 = 0.6;
+
+/// Which of the open tasks did the user mean? An index into `docs`, or `None`
+/// when none clearly matches — a wrong tick is worse than asking.
+async fn pick_candidate(query: &str, docs: &[Doc]) -> Option<usize> {
+    if crate::jev::enabled() {
+        let mut options: Vec<(String, String)> = docs.iter().take(crate::jev::MAX_OPTIONS - 1).enumerate().map(|(i, d)| (format!("task_{}", i + 1), d.title())).collect();
+        options.push(("none_of_these".into(), "No listed task is the one the user says they finished".into()));
+        let q = crate::jev::Q::choice("The user says they completed a task. Which open task do they mean?", options);
+        if let Some(pick) = crate::jev::choice(json!({ "user_says_completed": query }), q).await {
+            tracing::info!("complete_task pick: {}", pick.top(3));
+            return pick
+                .confident(PICK_MIN_CONFIDENCE)
+                .and_then(|c| c.strip_prefix("task_"))
+                .and_then(|n| n.parse::<usize>().ok())
+                .map(|n| n - 1)
+                .filter(|i| *i < docs.len());
+        }
+        // Jev failed: fall through to the LLM.
+    }
     let list = docs
         .iter()
         .enumerate()
         .map(|(i, d)| format!("{}. {}", i + 1, d.title()))
         .collect::<Vec<_>>()
         .join("\n");
-    let system = "You pick which open task the user means to mark complete. Output ONLY minified JSON {\"index\":<1-based number>} — the single best match by title. No prose, no code fences.";
+    let system = "You pick which open task the user means to mark complete. Output ONLY minified JSON {\"index\":<1-based number>} — the single best match by title, or {\"index\":0} if none of them is clearly it. No prose, no code fences.";
     let prompt = format!("User says they completed: \"{query}\"\n\nOPEN TASKS:\n{list}");
-    let raw = crate::openrouter::chat("anthropic/claude-haiku-4.5", system, &prompt).await.unwrap_or_default();
+    let raw = crate::openrouter::chat(&crate::llm::parser(), system, &prompt).await.unwrap_or_default();
     let trimmed = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    // An unreadable answer or 0 means "don't know" — never silently the first task.
     serde_json::from_str::<Value>(trimmed)
         .ok()
         .and_then(|v| v["index"].as_u64())
-        .map(|n| (n as usize).saturating_sub(1))
+        .filter(|n| *n >= 1)
+        .map(|n| n as usize - 1)
         .filter(|i| *i < docs.len())
-        .unwrap_or(0)
 }
 
 fn short_date(iso: &str) -> String {

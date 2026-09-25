@@ -42,6 +42,19 @@
       }
     },
     {
+      "id": "jev_category",
+      "type": "jev",
+      "position": { "x": 320, "y": 380 },
+      "data": {
+        "label": "Pick category (Jev)",
+        "kind": "choice",
+        "state": "{{input.text}}",
+        "instructions": "Which category does this task belong to? Appointments, calls, errands and paperwork count as admin.",
+        "options": "{{input.categories}}",
+        "min_confidence": "0.6"
+      }
+    },
+    {
       "id": "out",
       "type": "output",
       "position": {
@@ -69,6 +82,11 @@
       "id": "e3",
       "source": "dt",
       "target": "out"
+    },
+    {
+      "id": "e_jev",
+      "source": "trigger_1",
+      "target": "jev_category"
     }
   ]
 }
