@@ -115,7 +115,8 @@ only act when it is confident; without one, each falls back to the LLM prompt or
 | -------- | ------- | ------- |
 | `JEV_API_KEY` | unset | Key from console.typesafe.ai. Unset: every decision uses its previous path. |
 | `JEV_MODEL` | `jev-latest` | Pin a versioned id (e.g. `jev-1.13.0`) so thresholds don't drift when the alias moves. |
-| `JEV_BASE_URL` | `https://api.typesafe.ai` | API root, for a proxy or gateway. |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | API root, for a proxy or gateway. Set to `https://openrouter.ai/api` to
+  route Jev through OpenRouter with your existing key — same body and answers, model id `typesafe/jev-1.13`. |
 | `JEV_TRIAGE` | on | `off` stops the per-message chat triage (control phrasing, starting rung), which adds one Jev call per text message. |
 
 ## Behaviour

@@ -15,6 +15,12 @@
 //! Env: `JEV_API_KEY`, `JEV_MODEL` (default `jev-latest`; pin a versioned id
 //! such as `jev-1.13.0` once thresholds matter), `JEV_BASE_URL` (default
 //! `https://api.typesafe.ai`).
+//!
+//! OpenRouter also serves the model, which saves a second account: set
+//! `JEV_BASE_URL=https://openrouter.ai/api`, `JEV_MODEL=typesafe/jev-1.13` and
+//! the OpenRouter key. `/v1/systemone` is the same route there and takes this
+//! body unchanged; note the model is unlisted in OpenRouter's `/models`
+//! catalogue, so look it up by id rather than expecting to find it there.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
